@@ -1,0 +1,102 @@
+# Models
+
+clip_l = "/deployment/assets/sd35_base_models/clip_l.safetensors"
+clip_g = "/deployment/assets/sd35_base_models/clip_g.safetensors"
+t5xxl = "/deployment/assets/sd35_base_models/t5xxl_fp16.safetensors"
+pretrained_model_name_or_path = "/deployment/assets/sd35_base_models/sd3.5_large.safetensors"
+
+# Directories
+
+#train_data_dir = "/home/azureuser/Picturethis/Dima/ogoSiv_regWoman/img"
+logging_dir = "/home/azureuser/PictureThisCode/PictureThis/server/log"
+#output_dir = "/home/azureuser/Picturethis/Dima/sd3_outputs"
+
+# Captioning
+
+cache_latents = true
+caption_dropout_every_n_epochs = 0
+caption_dropout_rate = 0
+caption_extension = ".txt"
+clip_skip = 1
+keep_tokens = 0
+
+# Text Encoder Training
+
+use_t5xxl_cache_only = true
+t5xxl_dtype = "fp16"
+train_text_encoder = true
+
+# Learning Rates 
+
+learning_rate = 5e-6
+learning_rate_te1 = 1e-5 
+learning_rate_te2 = 1e-5
+loss_type = "l2"
+lr_scheduler = "cosine"
+lr_scheduler_args = []
+lr_scheduler_num_cycles = 1
+lr_scheduler_power = 0.5
+lr_warmup_steps = 0
+optimizer_type = "AdamW8bit"
+
+# Batch Sizes
+
+text_encoder_batch_size = 1
+train_batch_size = 1
+epoch = 1
+persistent_data_loader_workers = 0
+max_data_loader_n_workers = 0
+
+# Buckets, Noise & SNR
+
+max_bucket_reso = 2048
+min_bucket_reso = 256
+bucket_no_upscale = true
+bucket_reso_steps = 64
+huber_c = 0.1
+huber_schedule = "snr"
+min_snr_gamma = 5
+prior_loss_weight = 1
+max_timestep = 1000
+multires_noise_discount = 0.3
+multires_noise_iterations = 0
+noise_offset = 0
+noise_offset_type = "Original"
+adaptive_noise_scale = 0
+
+# SD3 Logits
+
+mode_scale = 1.29
+weighting_scheme = "logit_normal"
+logit_mean = 0
+logit_std = 1
+
+# VRAM Optimization
+
+resolution = "512,512"
+max_token_length = 75
+max_train_steps = 800
+mem_eff_attn = true
+mixed_precision = "fp16"
+full_fp16 = true
+gradient_accumulation_steps = 1
+gradient_checkpointing = true
+xformers = true
+dynamo_backend = "no"
+
+# Sampling
+
+sample_every_n_epochs = 50
+sample_prompts = "/home/azureuser/Picturethis/Dima/sd3_outputs/sample/prompt.txt"
+sample_sampler = "euler"
+
+# Model Saving
+
+save_every_n_steps = 200
+save_model_as = "diffusers"
+save_precision = "fp16"
+
+# General
+
+output_name = "last"
+log_with = "tensorboard"
