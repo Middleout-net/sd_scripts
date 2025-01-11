@@ -98,11 +98,21 @@ def save_sd3_model_on_train_end(
 ):
     def sd_saver(ckpt_file, epoch_no, global_step):
         sai_metadata = train_util.get_sai_model_spec(
-            None, args, False, False, False, is_stable_diffusion_ckpt=True, sd3=mmdit.model_type
+            None,
+            args,
+            False,
+            False,
+            False,
+            is_stable_diffusion_ckpt=True,
+            sd3=mmdit.model_type,
         )
-        save_models(ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype)
+        save_models(
+            ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype
+        )
 
-    train_util.save_sd_model_on_train_end_common(args, True, True, epoch, global_step, sd_saver, None)
+    train_util.save_sd_model_on_train_end_common(
+        args, True, True, epoch, global_step, sd_saver, None
+    )
 
 
 # epochとstepの保存、メタデータにepoch/stepが含まれ引数が同じになるため、統合している
@@ -123,9 +133,17 @@ def save_sd3_model_on_epoch_end_or_stepwise(
 ):
     def sd_saver(ckpt_file, epoch_no, global_step):
         sai_metadata = train_util.get_sai_model_spec(
-            None, args, False, False, False, is_stable_diffusion_ckpt=True, sd3=mmdit.model_type
+            None,
+            args,
+            False,
+            False,
+            False,
+            is_stable_diffusion_ckpt=True,
+            sd3=mmdit.model_type,
         )
-        save_models(ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype)
+        save_models(
+            ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype
+        )
 
     train_util.save_sd_model_on_epoch_end_or_stepwise_common(
         args,
@@ -242,13 +260,21 @@ def add_sd3_training_arguments(parser: argparse.ArgumentParser):
     )
 
 
-def verify_sdxl_training_args(args: argparse.Namespace, supportTextEncoderCaching: bool = True):
-    assert not args.v2, "v2 cannot be enabled in SDXL training / SDXL学習ではv2を有効にすることはできません"
+def verify_sdxl_training_args(
+    args: argparse.Namespace, supportTextEncoderCaching: bool = True
+):
+    assert (
+        not args.v2
+    ), "v2 cannot be enabled in SDXL training / SDXL学習ではv2を有効にすることはできません"
     if args.v_parameterization:
-        logger.warning("v_parameterization will be unexpected / SDXL学習ではv_parameterizationは想定外の動作になります")
+        logger.warning(
+            "v_parameterization will be unexpected / SDXL学習ではv_parameterizationは想定外の動作になります"
+        )
 
     if args.clip_skip is not None:
-        logger.warning("clip_skip will be unexpected / SDXL学習ではclip_skipは動作しません")
+        logger.warning(
+            "clip_skip will be unexpected / SDXL学習ではclip_skipは動作しません"
+        )
 
     # if args.multires_noise_iterations:
     #     logger.info(
@@ -268,7 +294,10 @@ def verify_sdxl_training_args(args: argparse.Namespace, supportTextEncoderCachin
     ), "weighted_captions cannot be enabled in SDXL training currently / SDXL学習では今のところweighted_captionsを有効にすることはできません"
 
     if supportTextEncoderCaching:
-        if args.cache_text_encoder_outputs_to_disk and not args.cache_text_encoder_outputs:
+        if (
+            args.cache_text_encoder_outputs_to_disk
+            and not args.cache_text_encoder_outputs
+        ):
             args.cache_text_encoder_outputs = True
             logger.warning(
                 "cache_text_encoder_outputs is enabled because cache_text_encoder_outputs_to_disk is enabled / "
@@ -318,7 +347,13 @@ def do_sample(
     else:
         generator = None
     noise = (
-        torch.randn(latent.size(), dtype=torch.float32, layout=latent.layout, generator=generator, device="cpu")
+        torch.randn(
+            latent.size(),
+            dtype=torch.float32,
+            layout=latent.layout,
+            generator=generator,
+            device="cpu",
+        )
         .to(latent.dtype)
         .to(device)
     )
@@ -327,7 +362,9 @@ def do_sample(
 
     sigmas = get_all_sigmas(model_sampling, steps).to(device)
 
-    noise_scaled = model_sampling.noise_scaling(sigmas[0], noise, latent, max_denoise(model_sampling, sigmas))
+    noise_scaled = model_sampling.noise_scaling(
+        sigmas[0], noise, latent, max_denoise(model_sampling, sigmas)
+    )
 
     c_crossattn = torch.cat([cond[0], neg_cond[0]]).to(device).to(dtype)
     y = torch.cat([cond[1], neg_cond[1]]).to(device).to(dtype)
@@ -393,20 +430,32 @@ def sample_images(
             if epoch is None or epoch % args.sample_every_n_epochs != 0:
                 return
         else:
-            if steps % args.sample_every_n_steps != 0 or epoch is not None:  # steps is not divisible or end of epoch
+            if (
+                steps % args.sample_every_n_steps != 0 or epoch is not None
+            ):  # steps is not divisible or end of epoch
                 return
 
     logger.info("")
-    logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {steps}")
+    logger.info(
+        f"generating sample images at step / サンプル画像生成 ステップ: {steps}"
+    )
     if not os.path.isfile(args.sample_prompts) and sample_prompts_te_outputs is None:
-        logger.error(f"No prompt file / プロンプトファイルがありません: {args.sample_prompts}")
+        logger.error(
+            f"No prompt file / プロンプトファイルがありません: {args.sample_prompts}"
+        )
         return
 
-    distributed_state = PartialState()  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
+    distributed_state = (
+        PartialState()
+    )  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
 
     # unwrap unet and text_encoder(s)
     mmdit = accelerator.unwrap_model(mmdit)
-    text_encoders = None if text_encoders is None else [accelerator.unwrap_model(te) for te in text_encoders]
+    text_encoders = (
+        None
+        if text_encoders is None
+        else [accelerator.unwrap_model(te) for te in text_encoders]
+    )
     # print([(te.parameters().__next__().device if te is not None else None) for te in text_encoders])
 
     prompts = train_util.load_prompts(args.sample_prompts)
@@ -418,7 +467,9 @@ def sample_images(
     rng_state = torch.get_rng_state()
     cuda_rng_state = None
     try:
-        cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+        cuda_rng_state = (
+            torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+        )
     except Exception:
         pass
 
@@ -447,7 +498,9 @@ def sample_images(
             per_process_prompts.append(prompts[i :: distributed_state.num_processes])
 
         with torch.no_grad():
-            with distributed_state.split_between_processes(per_process_prompts) as prompt_dict_lists:
+            with distributed_state.split_between_processes(
+                per_process_prompts
+            ) as prompt_dict_lists:
                 for prompt_dict in prompt_dict_lists[0]:
                     sample_image_inference(
                         accelerator,
@@ -497,7 +550,9 @@ def sample_image_inference(
     if prompt_replacement is not None:
         prompt = prompt.replace(prompt_replacement[0], prompt_replacement[1])
         if negative_prompt is not None:
-            negative_prompt = negative_prompt.replace(prompt_replacement[0], prompt_replacement[1])
+            negative_prompt = negative_prompt.replace(
+                prompt_replacement[0], prompt_replacement[1]
+            )
 
     if seed is not None:
         torch.manual_seed(seed)
@@ -535,7 +590,9 @@ def sample_image_inference(
             print(f"Encoding prompt: {prpt}")
             tokens_and_masks = tokenize_strategy.tokenize(prpt)
             # strategy has apply_t5_attn_mask option
-            encoded_text_encoder_conds = encoding_strategy.encode_tokens(tokenize_strategy, text_encoders, tokens_and_masks)
+            encoded_text_encoder_conds = encoding_strategy.encode_tokens(
+                tokenize_strategy, text_encoders, tokens_and_masks
+            )
 
             # if text_encoder_conds is not cached, use encoded_text_encoder_conds
             if len(text_encoder_conds) == 0:
@@ -547,43 +604,62 @@ def sample_image_inference(
                         text_encoder_conds[i] = encoded_text_encoder_conds[i]
         return text_encoder_conds
 
-    lg_out, t5_out, pooled, l_attn_mask, g_attn_mask, t5_attn_mask = encode_prompt(prompt)
+    lg_out, t5_out, pooled, l_attn_mask, g_attn_mask, t5_attn_mask = encode_prompt(
+        prompt
+    )
     cond = encoding_strategy.concat_encodings(lg_out, t5_out, pooled)
 
     # encode negative prompts
-    lg_out, t5_out, pooled, l_attn_mask, g_attn_mask, t5_attn_mask = encode_prompt(negative_prompt)
+    lg_out, t5_out, pooled, l_attn_mask, g_attn_mask, t5_attn_mask = encode_prompt(
+        negative_prompt
+    )
     neg_cond = encoding_strategy.concat_encodings(lg_out, t5_out, pooled)
 
-    # sample image
-    clean_memory_on_device(accelerator.device)
-    with accelerator.autocast(), torch.no_grad():
-        # mmdit may be fp8, so we need weight_dtype here. vae is always in that dtype.
-        latents = do_sample(height, width, seed, cond, neg_cond, mmdit, sample_steps, scale, vae.dtype, accelerator.device)
+    for i in range(4):
+        # sample image
+        clean_memory_on_device(accelerator.device)
+        with accelerator.autocast(), torch.no_grad():
+            # mmdit may be fp8, so we need weight_dtype here. vae is always in that dtype.
+            latents = do_sample(
+                height,
+                width,
+                seed,
+                cond,
+                neg_cond,
+                mmdit,
+                sample_steps,
+                scale,
+                vae.dtype,
+                accelerator.device,
+            )
 
-    # latent to image
-    clean_memory_on_device(accelerator.device)
-    org_vae_device = vae.device  # will be on cpu
-    vae.to(accelerator.device)
-    latents = vae.process_out(latents.to(vae.device, dtype=vae.dtype))
-    image = vae.decode(latents)
-    vae.to(org_vae_device)
-    clean_memory_on_device(accelerator.device)
+        # latent to image
+        clean_memory_on_device(accelerator.device)
+        org_vae_device = vae.device  # will be on cpu
+        vae.to(accelerator.device)
+        latents = vae.process_out(latents.to(vae.device, dtype=vae.dtype))
+        image = vae.decode(latents)
+        vae.to(org_vae_device)
+        clean_memory_on_device(accelerator.device)
 
-    image = image.float()
-    image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
-    decoded_np = 255.0 * np.moveaxis(image.cpu().numpy(), 0, 2)
-    decoded_np = decoded_np.astype(np.uint8)
+        image = image.float()
+        image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
+        decoded_np = 255.0 * np.moveaxis(image.cpu().numpy(), 0, 2)
+        decoded_np = decoded_np.astype(np.uint8)
 
-    image = Image.fromarray(decoded_np)
-    # adding accelerator.wait_for_everyone() here should sync up and ensure that sample images are saved in the same order as the original prompt list
-    # but adding 'enum' to the filename should be enough
+        image = Image.fromarray(decoded_np)
+        # adding accelerator.wait_for_everyone() here should sync up and ensure that sample images are saved in the same order as the original prompt list
+        # but adding 'enum' to the filename should be enough
 
-    ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
-    num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-    seed_suffix = "" if seed is None else f"_{seed}"
-    i: int = prompt_dict["enum"]
-    img_filename = f"{'' if args.output_name is None else args.output_name + '-'}{num_suffix}-{i:02d}-{ts_str}{seed_suffix}.png"
-    image.save(os.path.join(save_dir, img_filename))
+        ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
+        num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+        seed_suffix = "" if seed is None else f"_{seed}"
+        i: int = prompt_dict["enum"]
+        img_filename = f"{'' if args.output_name is None else args.output_name + '-'}{num_suffix}-{i:02d}-{ts_str}{seed_suffix}.png"
+        os.makedirs(os.path.join(save_dir, str(steps)), exist_ok=True)
+        # Add steps as folder
+        image.save(os.path.join(save_dir, str(steps), img_filename))
+        # image.save(os.path.join(save_dir, img_filename))
 
     # send images to wandb if enabled
     if "wandb" in [tracker.name for tracker in accelerator.trackers]:
@@ -592,7 +668,9 @@ def sample_image_inference(
         import wandb
 
         # not to commit images to avoid inconsistency between training and logging steps
-        wandb_tracker.log({f"sample_{i}": wandb.Image(image, caption=prompt)}, commit=False)  # positive prompt as a caption
+        wandb_tracker.log(
+            {f"sample_{i}": wandb.Image(image, caption=prompt)}, commit=False
+        )  # positive prompt as a caption
 
 
 # region Diffusers
@@ -650,7 +728,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         num_train_timesteps: int = 1000,
         shift: float = 1.0,
     ):
-        timesteps = np.linspace(1, num_train_timesteps, num_train_timesteps, dtype=np.float32)[::-1].copy()
+        timesteps = np.linspace(
+            1, num_train_timesteps, num_train_timesteps, dtype=np.float32
+        )[::-1].copy()
         timesteps = torch.from_numpy(timesteps).to(dtype=torch.float32)
 
         sigmas = timesteps / num_train_timesteps
@@ -720,7 +800,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
     def _sigma_to_t(self, sigma):
         return sigma * self.config.num_train_timesteps
 
-    def set_timesteps(self, num_inference_steps: int, device: Union[str, torch.device] = None):
+    def set_timesteps(
+        self, num_inference_steps: int, device: Union[str, torch.device] = None
+    ):
         """
         Sets the discrete timesteps used for the diffusion chain (to be run before inference).
 
@@ -732,7 +814,11 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         """
         self.num_inference_steps = num_inference_steps
 
-        timesteps = np.linspace(self._sigma_to_t(self.sigma_max), self._sigma_to_t(self.sigma_min), num_inference_steps)
+        timesteps = np.linspace(
+            self._sigma_to_t(self.sigma_max),
+            self._sigma_to_t(self.sigma_min),
+            num_inference_steps,
+        )
 
         sigmas = timesteps / self.config.num_train_timesteps
         sigmas = self.config.shift * sigmas / (1 + (self.config.shift - 1) * sigmas)
@@ -807,7 +893,11 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 returned, otherwise a tuple is returned where the first element is the sample tensor.
         """
 
-        if isinstance(timestep, int) or isinstance(timestep, torch.IntTensor) or isinstance(timestep, torch.LongTensor):
+        if (
+            isinstance(timestep, int)
+            or isinstance(timestep, torch.IntTensor)
+            or isinstance(timestep, torch.LongTensor)
+        ):
             raise ValueError(
                 (
                     "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
@@ -824,9 +914,18 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         sigma = self.sigmas[self.step_index]
 
-        gamma = min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.0
+        gamma = (
+            min(s_churn / (len(self.sigmas) - 1), 2**0.5 - 1)
+            if s_tmin <= sigma <= s_tmax
+            else 0.0
+        )
 
-        noise = randn_tensor(model_output.shape, dtype=model_output.dtype, device=model_output.device, generator=generator)
+        noise = randn_tensor(
+            model_output.shape,
+            dtype=model_output.dtype,
+            device=model_output.device,
+            generator=generator,
+        )
 
         eps = noise * s_noise
         sigma_hat = sigma * (gamma + 1)
@@ -875,7 +974,11 @@ def get_sigmas(noise_scheduler, timesteps, device, n_dim=4, dtype=torch.float32)
 
 
 def compute_density_for_timestep_sampling(
-    weighting_scheme: str, batch_size: int, logit_mean: float = None, logit_std: float = None, mode_scale: float = None
+    weighting_scheme: str,
+    batch_size: int,
+    logit_mean: float = None,
+    logit_std: float = None,
+    mode_scale: float = None,
 ):
     """Compute the density for sampling the timesteps when doing SD3 training.
 
@@ -885,7 +988,9 @@ def compute_density_for_timestep_sampling(
     """
     if weighting_scheme == "logit_normal":
         # See 3.1 in the SD3 paper ($rf/lognorm(0.00,1.00)$).
-        u = torch.normal(mean=logit_mean, std=logit_std, size=(batch_size,), device="cpu")
+        u = torch.normal(
+            mean=logit_mean, std=logit_std, size=(batch_size,), device="cpu"
+        )
         u = torch.nn.functional.sigmoid(u)
     elif weighting_scheme == "mode":
         u = torch.rand(size=(batch_size,), device="cpu")
@@ -915,7 +1020,9 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
 # endregion
 
 
-def get_noisy_model_input_and_timesteps(args, latents, noise, device, dtype) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def get_noisy_model_input_and_timesteps(
+    args, latents, noise, device, dtype
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     bsz = latents.shape[0]
 
     # Sample a random timestep for each image
