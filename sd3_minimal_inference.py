@@ -24,16 +24,7 @@ from library.utils import setup_logging
 
 setup_logging()
 import logging
-from utils.log_stream import LogStream,LogStreamHandler
-log_stream = LogStream()
-log_handler = LogStreamHandler(log_stream)
-formatter = logging.Formatter(
-        fmt="%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-log_handler.setFormatter(formatter)
 logger = logging.getLogger(__name__)
-logger.addHandler(log_handler)
 from library import sd3_models, sd3_utils, strategy_sd3
 from library.utils import load_safetensors
 
@@ -438,7 +429,6 @@ def sd3_prepare_generation(
     t5xxl_token_length,
     prompt,
     negative_prompt,
-    seed,
     steps,
     width,
     height,
@@ -520,8 +510,6 @@ def sd3_prepare_generation(
         prompt,
         "--negative_prompt",
         negative_prompt,
-        "--seed",
-        str(seed),
         "--steps",
         str(steps),
         "--width",
@@ -580,7 +568,7 @@ def sd3_prepare_generation(
         "t5xxl": t5xxl,
         "device": device,
         "prompt": prompt,
-        "seed": seed,
+        "seed": -1,
         "width": width,
         "height": height,
         "negative_prompt": negative_prompt,

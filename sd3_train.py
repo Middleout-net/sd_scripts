@@ -31,6 +31,8 @@ from library.utils import setup_logging, add_logging_arguments
 setup_logging()
 import logging
 
+from log_stream import LogStream,LogStreamHandler
+
 logger = logging.getLogger(__name__)
 
 import library.config_util as config_util
@@ -982,7 +984,11 @@ def train(args):
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-
+    parser.add_argument(
+        "--log_stream_client_id",
+        type=str,
+        default=-1,
+    )
     add_logging_arguments(parser)
     train_util.add_sd_models_arguments(parser)
     train_util.add_dataset_arguments(parser, True, True, True)
@@ -1062,12 +1068,30 @@ def setup_parser() -> argparse.ArgumentParser:
     )
     return parser
 
+import sys
+from contextlib import contextmanager
+
+@contextmanager
+def redirect_output(log_stream):
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = log_stream
+    sys.stderr = log_stream
+    try:
+        yield
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
 
 if __name__ == "__main__":
     parser = setup_parser()
-
     args = parser.parse_args()
     train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
-
-    train(args)
+    print("Sending training logs to client id: "+str(args.log_stream_client_id))
+    if args.log_stream_client_id==-1:
+        train(args)
+    else:
+        log_stream = LogStream(client_id=str(args.log_stream_client_id))
+        with redirect_output(log_stream):
+            train(args)

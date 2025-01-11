@@ -74,7 +74,7 @@ logit_std = 1
 # VRAM Optimization
 
 resolution = "512,512"
-max_token_length = 75
+max_token_length = 256
 max_train_steps = 800
 mem_eff_attn = true
 mixed_precision = "fp16"
@@ -86,9 +86,9 @@ dynamo_backend = "no"
 
 # Sampling
 
-sample_every_n_epochs = 50
-sample_prompts = "/home/azureuser/Picturethis/Dima/sd3_outputs/sample/prompt.txt"
-sample_sampler = "euler"
+#sample_every_n_epochs = 50
+#sample_prompts = "/home/azureuser/Picturethis/Dima/sd3_outputs/sample/prompt.txt"
+#sample_sampler = "euler"
 
 # Model Saving
 
@@ -98,5 +98,5 @@ save_precision = "fp16"
 
 # General
 
-output_name = "last"
+output_name = "sd35"
 log_with = "tensorboard"
