@@ -1,5 +1,3 @@
-# Models
-
 clip_l = "/deployment/assets/sd35_base_models/clip_l.safetensors"
 clip_g = "/deployment/assets/sd35_base_models/clip_g.safetensors"
 t5xxl = "/deployment/assets/sd35_base_models/t5xxl_fp16.safetensors"
@@ -8,7 +6,7 @@ pretrained_model_name_or_path = "/deployment/assets/sd35_base_models/sd3.5_large
 # Directories
 
 #train_data_dir = "/home/azureuser/Picturethis/Dima/ogoSiv_regWoman/img"
-logging_dir = "/home/azureuser/PictureThisCode/PictureThis/server/log"
+logging_dir = "/home/azureuser/PT/PictureThis/server/log"
 #output_dir = "/home/azureuser/Picturethis/Dima/sd3_outputs"
 
 # Captioning
@@ -92,7 +90,7 @@ dynamo_backend = "no"
 
 # Model Saving
 
-save_every_n_steps = 200
+#save_every_n_steps = 200
 save_model_as = "diffusers"
 save_precision = "fp16"
 
@@ -100,3 +98,4 @@ save_precision = "fp16"
 
 output_name = "sd35"
 log_with = "tensorboard"
+

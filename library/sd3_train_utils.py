@@ -652,13 +652,13 @@ def sample_image_inference(
         # but adding 'enum' to the filename should be enough
 
         ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
-        num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+        num_suffix = f"e{epoch:06d}" if epoch is not None else f"{epoch:06d}"
         seed_suffix = "" if seed is None else f"_{seed}"
         i: int = prompt_dict["enum"]
         img_filename = f"{'' if args.output_name is None else args.output_name + '-'}{num_suffix}-{i:02d}-{ts_str}{seed_suffix}.png"
-        os.makedirs(os.path.join(save_dir, str(steps)), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, str(epoch)), exist_ok=True)
         # Add steps as folder
-        image.save(os.path.join(save_dir, str(steps), img_filename))
+        image.save(os.path.join(save_dir, str(epoch), img_filename))
         # image.save(os.path.join(save_dir, img_filename))
 
     # send images to wandb if enabled
