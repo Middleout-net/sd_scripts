@@ -606,7 +606,7 @@ if __name__ == "__main__":
     target_height = 1024
     target_width = 1024
 
-    ## steps = 50  # 28  # 50
+    # steps = 50  # 28  # 50
     # cfg_scale = 5
     # seed = 1  # None  # 1
 
