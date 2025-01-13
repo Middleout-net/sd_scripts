@@ -26,11 +26,11 @@ train_text_encoder = true
 
 # Learning Rates 
 
-learning_rate = 1e-4
-learning_rate_te1 = 1e-6 
-learning_rate_te2 = 1e-6
+learning_rate = 1e-6
+learning_rate_te1 = 1e-5 
+learning_rate_te2 = 1e-5
 loss_type = "l2"
-lr_scheduler = "cosine"
+lr_scheduler = "constant"
 lr_scheduler_args = []
 lr_scheduler_num_cycles = 1
 lr_scheduler_power = 0.5
