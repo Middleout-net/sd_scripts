@@ -73,6 +73,7 @@ def do_sample(
     dtype: torch.dtype,
     device: str,
     vae: Optional[sd3_models.SDVAE] = None,
+    cancel_flag: list = [],
 ):
     if initial_latent is None:
         # latent = torch.ones(1, 16, height // 8, width // 8, device=device) * 0.0609 # this seems to be a bug in the original code. thanks to furusu for pointing it out
@@ -105,6 +106,9 @@ def do_sample(
 
     with torch.no_grad():
         for i in tqdm(range(len(sigmas) - 1)):
+            if len(cancel_flag)>0:
+                logger.info(f"Operation cancelled at step {i}/{steps}.")
+                return None # return None to indicate cancellation
             sigma_hat = sigmas[i]
 
             timestep = model_sampling.timestep(sigma_hat).float()
@@ -158,6 +162,7 @@ def generate_image(
     encoding_strategy: Optional[strategy_sd3.Sd3TextEncodingStrategy] = None,
     args: Optional[argparse.Namespace] = None,
     sd3_dtype: Optional[torch.dtype] = None,
+    cancel_flag: list=[],
 ):
     # prepare embeddings
     logger.info("Encoding prompts...")
@@ -215,7 +220,10 @@ def generate_image(
         sd3_dtype,
         device,
         vae,
+        cancel_flag
     )
+    if latent_sampled is None:
+        return None
     if args.offload:
         mmdit.to("cpu")
 
@@ -260,6 +268,7 @@ def generate_sd3_image(
     cfg_scale,
     offload=False,
     lora_weights=None,
+    cancel_flag=[],
 ):
     device = get_preferred_device()
     fake_args = [
@@ -419,6 +428,7 @@ def generate_sd3_image(
         encoding_strategy,
         args,
         sd3_dtype,
+        cancel_flag=cancel_flag,
     )
 
 def sd3_prepare_generation(
@@ -581,7 +591,7 @@ def sd3_prepare_generation(
         
     }
 
-def sd3_generate_image_with_prepared_data(prepared_data):
+def sd3_generate_image_with_prepared_data(prepared_data,cancel_flag):
     return generate_image(
         prepared_data["mmdit"],
         prepared_data["vae"],
@@ -600,6 +610,7 @@ def sd3_generate_image_with_prepared_data(prepared_data):
         prepared_data["encoding_strategy"],
         prepared_data["args"], 
         prepared_data["sd3_dtype"],
+        cancel_flag=cancel_flag,
     )
 
 if __name__ == "__main__":
