@@ -483,7 +483,8 @@ def sd3_prepare_generation(
     vae.eval()
 
     logger.info("Loading tokenizers...")
-    tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(t5xxl_token_length)
+    tokenizers_folder=os.path.dirname(clip_l_path)
+    tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(t5xxl_token_length,tokenizers_folder)
     encoding_strategy = strategy_sd3.Sd3TextEncodingStrategy()
 
     # Apply LoRA weights

@@ -211,8 +211,9 @@ def train(args):
     else:
         sd3_state_dict = None
 
-    # load tokenizer and prepare tokenize strategy
-    sd3_tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(args.t5xxl_max_token_length)
+    # load tokenizer and prepare tokenize strategy LOCALLY
+    tokenizers_folder=os.path.dirname(args.clip_l)
+    sd3_tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(args.t5xxl_max_token_length,tokenizers_folder)
     strategy_base.TokenizeStrategy.set_strategy(sd3_tokenize_strategy)
 
     # load clip_l, clip_g, t5xxl for caching text encoder outputs
