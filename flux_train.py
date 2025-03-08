@@ -30,7 +30,13 @@ from library.device_utils import init_ipex, clean_memory_on_device
 init_ipex()
 
 from accelerate.utils import set_seed
-from library import deepspeed_utils, flux_train_utils, flux_utils, strategy_base, strategy_flux
+from library import (
+    deepspeed_utils,
+    flux_train_utils,
+    flux_utils,
+    strategy_base,
+    strategy_flux,
+)
 from library.sd3_train_utils import FlowMatchEulerDiscreteScheduler
 
 import library.train_util as train_util
@@ -39,6 +45,7 @@ from library.utils import setup_logging, add_logging_arguments
 
 setup_logging()
 import logging
+from log_stream import LogStream
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +87,7 @@ def train(args):
 
     assert (
         args.blocks_to_swap is None or args.blocks_to_swap == 0
-    ) or not args.cpu_offload_checkpointing, (
-        "blocks_to_swap is not supported with cpu_offload_checkpointing / blocks_to_swapはcpu_offload_checkpointingと併用できません"
-    )
+    ) or not args.cpu_offload_checkpointing, "blocks_to_swap is not supported with cpu_offload_checkpointing / blocks_to_swapはcpu_offload_checkpointingと併用できません"
 
     cache_latents = args.cache_latents
     use_dreambooth_method = args.in_json is None
@@ -99,7 +104,9 @@ def train(args):
 
     # データセットを準備する
     if args.dataset_class is None:
-        blueprint_generator = BlueprintGenerator(ConfigSanitizer(True, True, args.masked_loss, True))
+        blueprint_generator = BlueprintGenerator(
+            ConfigSanitizer(True, True, args.masked_loss, True)
+        )
         if args.dataset_config is not None:
             logger.info(f"Load dataset config from {args.dataset_config}")
             user_config = config_util.load_user_config(args.dataset_config)
@@ -138,30 +145,43 @@ def train(args):
                 }
 
         blueprint = blueprint_generator.generate(user_config, args)
-        train_dataset_group, val_dataset_group = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+        train_dataset_group, val_dataset_group = (
+            config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+        )
     else:
         train_dataset_group = train_util.load_arbitrary_dataset(args)
         val_dataset_group = None
 
     current_epoch = Value("i", 0)
     current_step = Value("i", 0)
-    ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
+    ds_for_collator = (
+        train_dataset_group if args.max_data_loader_n_workers == 0 else None
+    )
     collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
 
     train_dataset_group.verify_bucket_reso_steps(16)  # TODO これでいいか確認
 
-    _, is_schnell, _, _ = flux_utils.analyze_checkpoint_state(args.pretrained_model_name_or_path)
+    _, is_schnell, _, _ = flux_utils.analyze_checkpoint_state(
+        args.pretrained_model_name_or_path
+    )
     if args.debug_dataset:
         if args.cache_text_encoder_outputs:
             strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(
                 strategy_flux.FluxTextEncoderOutputsCachingStrategy(
-                    args.cache_text_encoder_outputs_to_disk, args.text_encoder_batch_size, args.skip_cache_check, False
+                    args.cache_text_encoder_outputs_to_disk,
+                    args.text_encoder_batch_size,
+                    args.skip_cache_check,
+                    False,
                 )
             )
         t5xxl_max_token_length = (
-            args.t5xxl_max_token_length if args.t5xxl_max_token_length is not None else (256 if is_schnell else 512)
+            args.t5xxl_max_token_length
+            if args.t5xxl_max_token_length is not None
+            else (256 if is_schnell else 512)
         )
-        strategy_base.TokenizeStrategy.set_strategy(strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length))
+        strategy_base.TokenizeStrategy.set_strategy(
+            strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length)
+        )
 
         train_dataset_group.set_current_strategies()
         train_util.debug_dataset(train_dataset_group, True)
@@ -194,7 +214,9 @@ def train(args):
     # load VAE for caching latents
     ae = None
     if cache_latents:
-        ae = flux_utils.load_ae(args.ae, weight_dtype, "cpu", args.disable_mmap_load_safetensors)
+        ae = flux_utils.load_ae(
+            args.ae, weight_dtype, "cpu", args.disable_mmap_load_safetensors
+        )
         ae.to(accelerator.device, dtype=weight_dtype)
         ae.requires_grad_(False)
         ae.eval()
@@ -219,14 +241,20 @@ def train(args):
     strategy_base.TokenizeStrategy.set_strategy(flux_tokenize_strategy)
 
     # load clip_l, t5xxl for caching text encoder outputs
-    clip_l = flux_utils.load_clip_l(args.clip_l, weight_dtype, "cpu", args.disable_mmap_load_safetensors)
-    t5xxl = flux_utils.load_t5xxl(args.t5xxl, weight_dtype, "cpu", args.disable_mmap_load_safetensors)
+    clip_l = flux_utils.load_clip_l(
+        args.clip_l, weight_dtype, "cpu", args.disable_mmap_load_safetensors
+    )
+    t5xxl = flux_utils.load_t5xxl(
+        args.t5xxl, weight_dtype, "cpu", args.disable_mmap_load_safetensors
+    )
     clip_l.eval()
     t5xxl.eval()
     clip_l.requires_grad_(False)
     t5xxl.requires_grad_(False)
 
-    text_encoding_strategy = strategy_flux.FluxTextEncodingStrategy(args.apply_t5_attn_mask)
+    text_encoding_strategy = strategy_flux.FluxTextEncodingStrategy(
+        args.apply_t5_attn_mask
+    )
     strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
 
     # cache text encoder outputs
@@ -236,30 +264,52 @@ def train(args):
         clip_l.to(accelerator.device)
         t5xxl.to(accelerator.device)
 
-        text_encoder_caching_strategy = strategy_flux.FluxTextEncoderOutputsCachingStrategy(
-            args.cache_text_encoder_outputs_to_disk, args.text_encoder_batch_size, False, False, args.apply_t5_attn_mask
+        text_encoder_caching_strategy = (
+            strategy_flux.FluxTextEncoderOutputsCachingStrategy(
+                args.cache_text_encoder_outputs_to_disk,
+                args.text_encoder_batch_size,
+                False,
+                False,
+                args.apply_t5_attn_mask,
+            )
         )
-        strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_caching_strategy)
+        strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(
+            text_encoder_caching_strategy
+        )
 
         with accelerator.autocast():
-            train_dataset_group.new_cache_text_encoder_outputs([clip_l, t5xxl], accelerator)
+            train_dataset_group.new_cache_text_encoder_outputs(
+                [clip_l, t5xxl], accelerator
+            )
 
         # cache sample prompt's embeddings to free text encoder's memory
         if args.sample_prompts is not None:
-            logger.info(f"cache Text Encoder outputs for sample prompt: {args.sample_prompts}")
+            logger.info(
+                f"cache Text Encoder outputs for sample prompt: {args.sample_prompts}"
+            )
 
-            text_encoding_strategy: strategy_flux.FluxTextEncodingStrategy = strategy_base.TextEncodingStrategy.get_strategy()
+            text_encoding_strategy: strategy_flux.FluxTextEncodingStrategy = (
+                strategy_base.TextEncodingStrategy.get_strategy()
+            )
 
             prompts = train_util.load_prompts(args.sample_prompts)
             sample_prompts_te_outputs = {}  # key: prompt, value: text encoder outputs
             with accelerator.autocast(), torch.no_grad():
                 for prompt_dict in prompts:
-                    for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]:
+                    for p in [
+                        prompt_dict.get("prompt", ""),
+                        prompt_dict.get("negative_prompt", ""),
+                    ]:
                         if p not in sample_prompts_te_outputs:
                             logger.info(f"cache Text Encoder outputs for prompt: {p}")
                             tokens_and_masks = flux_tokenize_strategy.tokenize(p)
-                            sample_prompts_te_outputs[p] = text_encoding_strategy.encode_tokens(
-                                flux_tokenize_strategy, [clip_l, t5xxl], tokens_and_masks, args.apply_t5_attn_mask
+                            sample_prompts_te_outputs[p] = (
+                                text_encoding_strategy.encode_tokens(
+                                    flux_tokenize_strategy,
+                                    [clip_l, t5xxl],
+                                    tokens_and_masks,
+                                    args.apply_t5_attn_mask,
+                                )
                             )
 
         accelerator.wait_for_everyone()
@@ -271,7 +321,10 @@ def train(args):
 
     # load FLUX
     _, flux = flux_utils.load_flow_model(
-        args.pretrained_model_name_or_path, weight_dtype, "cpu", args.disable_mmap_load_safetensors
+        args.pretrained_model_name_or_path,
+        weight_dtype,
+        "cpu",
+        args.disable_mmap_load_safetensors,
     )
 
     if args.gradient_checkpointing:
@@ -316,7 +369,9 @@ def train(args):
     training_models.append(flux)
     name_and_params = list(flux.named_parameters())
     # single param group for now
-    params_to_optimize.append({"params": [p for _, p in name_and_params], "lr": args.learning_rate})
+    params_to_optimize.append(
+        {"params": [p for _, p in name_and_params], "lr": args.learning_rate}
+    )
     param_names = [[n for n, _ in name_and_params]]
 
     # calculate number of trainable parameters
@@ -340,7 +395,9 @@ def train(args):
         param_group = {}
         for group in params_to_optimize:
             named_parameters = list(flux.named_parameters())
-            assert len(named_parameters) == len(group["params"]), "number of parameters does not match"
+            assert len(named_parameters) == len(
+                group["params"]
+            ), "number of parameters does not match"
             for p, np in zip(group["params"], named_parameters):
                 # determine target layer and block index for each parameter
                 block_type = "other"  # double, single or other
@@ -375,15 +432,23 @@ def train(args):
             optimizers.append(optimizer)
         optimizer = optimizers[0]  # avoid error in the following code
 
-        logger.info(f"using {len(optimizers)} optimizers for blockwise fused optimizers")
+        logger.info(
+            f"using {len(optimizers)} optimizers for blockwise fused optimizers"
+        )
 
         if train_util.is_schedulefree_optimizer(optimizers[0], args):
-            raise ValueError("Schedule-free optimizer is not supported with blockwise fused optimizers")
+            raise ValueError(
+                "Schedule-free optimizer is not supported with blockwise fused optimizers"
+            )
         optimizer_train_fn = lambda: None  # dummy function
         optimizer_eval_fn = lambda: None  # dummy function
     else:
-        _, _, optimizer = train_util.get_optimizer(args, trainable_params=params_to_optimize)
-        optimizer_train_fn, optimizer_eval_fn = train_util.get_optimizer_train_eval_fn(optimizer, args)
+        _, _, optimizer = train_util.get_optimizer(
+            args, trainable_params=params_to_optimize
+        )
+        optimizer_train_fn, optimizer_eval_fn = train_util.get_optimizer_train_eval_fn(
+            optimizer, args
+        )
 
     # prepare dataloader
     # strategies are set here because they cannot be referenced in another process. Copy them with the dataset
@@ -391,7 +456,9 @@ def train(args):
     train_dataset_group.set_current_strategies()
 
     # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
-    n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
+    n_workers = min(
+        args.max_data_loader_n_workers, os.cpu_count()
+    )  # cpu_count or max_data_loader_n_workers
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset_group,
         batch_size=1,
@@ -404,7 +471,9 @@ def train(args):
     # 学習ステップ数を計算する
     if args.max_train_epochs is not None:
         args.max_train_steps = args.max_train_epochs * math.ceil(
-            len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
+            len(train_dataloader)
+            / accelerator.num_processes
+            / args.gradient_accumulation_steps
         )
         accelerator.print(
             f"override steps. steps for {args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}"
@@ -416,10 +485,15 @@ def train(args):
     # lr schedulerを用意する
     if args.blockwise_fused_optimizers:
         # prepare lr schedulers for each optimizer
-        lr_schedulers = [train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes) for optimizer in optimizers]
+        lr_schedulers = [
+            train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes)
+            for optimizer in optimizers
+        ]
         lr_scheduler = lr_schedulers[0]  # avoid error in the following code
     else:
-        lr_scheduler = train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes)
+        lr_scheduler = train_util.get_scheduler_fix(
+            args, optimizer, accelerator.num_processes
+        )
 
     # 実験的機能：勾配も含めたfp16/bf16学習を行う　モデル全体をfp16/bf16にする
     if args.full_fp16:
@@ -461,8 +535,12 @@ def train(args):
         # if we doesn't swap blocks, we can move the model to device
         flux = accelerator.prepare(flux, device_placement=[not is_swapping_blocks])
         if is_swapping_blocks:
-            accelerator.unwrap_model(flux).move_to_device_except_swap_blocks(accelerator.device)  # reduce peak memory usage
-        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
+            accelerator.unwrap_model(flux).move_to_device_except_swap_blocks(
+                accelerator.device
+            )  # reduce peak memory usage
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            optimizer, train_dataloader, lr_scheduler
+        )
 
     # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
     if args.full_fp16:
@@ -492,7 +570,9 @@ def train(args):
 
                         return grad_hook
 
-                    parameter.register_post_accumulate_grad_hook(create_grad_hook(param_name, param_group))
+                    parameter.register_post_accumulate_grad_hook(
+                        create_grad_hook(param_name, param_group)
+                    )
 
     elif args.blockwise_fused_optimizers:
         # prepare for additional optimizers and lr schedulers
@@ -516,7 +596,9 @@ def train(args):
 
                         def grad_hook(parameter: torch.Tensor):
                             if accelerator.sync_gradients and args.max_grad_norm != 0.0:
-                                accelerator.clip_grad_norm_(parameter, args.max_grad_norm)
+                                accelerator.clip_grad_norm_(
+                                    parameter, args.max_grad_norm
+                                )
 
                             i = parameter_optimizer_map[parameter]
                             optimizer_hooked_count[i] += 1
@@ -529,16 +611,24 @@ def train(args):
                         num_parameters_per_group[opt_idx] += 1
 
     # epoch数を計算する
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(
+        len(train_dataloader) / args.gradient_accumulation_steps
+    )
     num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
     if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
-        args.save_every_n_epochs = math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
+        args.save_every_n_epochs = (
+            math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
+        )
 
     # 学習する
     # total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     accelerator.print("running training / 学習開始")
-    accelerator.print(f"  num examples / サンプル数: {train_dataset_group.num_train_images}")
-    accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
+    accelerator.print(
+        f"  num examples / サンプル数: {train_dataset_group.num_train_images}"
+    )
+    accelerator.print(
+        f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}"
+    )
     accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
     accelerator.print(
         f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
@@ -546,13 +636,24 @@ def train(args):
     # accelerator.print(
     #     f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}"
     # )
-    accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-    accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+    accelerator.print(
+        f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}"
+    )
+    accelerator.print(
+        f"  total optimization steps / 学習ステップ数: {args.max_train_steps}"
+    )
 
-    progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
+    progress_bar = tqdm(
+        range(args.max_train_steps),
+        smoothing=0,
+        disable=not accelerator.is_local_main_process,
+        desc="steps",
+    )
     global_step = 0
 
-    noise_scheduler = FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=args.discrete_flow_shift)
+    noise_scheduler = FlowMatchEulerDiscreteScheduler(
+        num_train_timesteps=1000, shift=args.discrete_flow_shift
+    )
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
 
     if accelerator.is_main_process:
@@ -572,7 +673,16 @@ def train(args):
 
     # For --sample_at_first
     optimizer_eval_fn()
-    flux_train_utils.sample_images(accelerator, args, 0, global_step, flux, ae, [clip_l, t5xxl], sample_prompts_te_outputs)
+    flux_train_utils.sample_images(
+        accelerator,
+        args,
+        0,
+        global_step,
+        flux,
+        ae,
+        [clip_l, t5xxl],
+        sample_prompts_te_outputs,
+    )
     optimizer_train_fn()
     if len(accelerator.trackers) > 0:
         # log empty object to commit the sample images to wandb
@@ -591,15 +701,21 @@ def train(args):
             current_step.value = global_step
 
             if args.blockwise_fused_optimizers:
-                optimizer_hooked_count = {i: 0 for i in range(len(optimizers))}  # reset counter for each step
+                optimizer_hooked_count = {
+                    i: 0 for i in range(len(optimizers))
+                }  # reset counter for each step
 
             with accelerator.accumulate(*training_models):
                 if "latents" in batch and batch["latents"] is not None:
-                    latents = batch["latents"].to(accelerator.device, dtype=weight_dtype)
+                    latents = batch["latents"].to(
+                        accelerator.device, dtype=weight_dtype
+                    )
                 else:
                     with torch.no_grad():
                         # encode images to latents. images are [-1, 1]
-                        latents = ae.encode(batch["images"].to(ae.dtype)).to(accelerator.device, dtype=weight_dtype)
+                        latents = ae.encode(batch["images"].to(ae.dtype)).to(
+                            accelerator.device, dtype=weight_dtype
+                        )
 
                     # NaNが含まれていれば警告を表示し0に置き換える
                     if torch.any(torch.isnan(latents)):
@@ -613,12 +729,20 @@ def train(args):
                     # not cached or training, so get from text encoders
                     tokens_and_masks = batch["input_ids_list"]
                     with torch.no_grad():
-                        input_ids = [ids.to(accelerator.device) for ids in batch["input_ids_list"]]
+                        input_ids = [
+                            ids.to(accelerator.device)
+                            for ids in batch["input_ids_list"]
+                        ]
                         text_encoder_conds = text_encoding_strategy.encode_tokens(
-                            flux_tokenize_strategy, [clip_l, t5xxl], input_ids, args.apply_t5_attn_mask
+                            flux_tokenize_strategy,
+                            [clip_l, t5xxl],
+                            input_ids,
+                            args.apply_t5_attn_mask,
                         )
                         if args.full_fp16:
-                            text_encoder_conds = [c.to(weight_dtype) for c in text_encoder_conds]
+                            text_encoder_conds = [
+                                c.to(weight_dtype) for c in text_encoder_conds
+                            ]
 
                 # TODO support some features for noise implemented in get_noise_noisy_latents_and_timesteps
 
@@ -627,17 +751,33 @@ def train(args):
                 bsz = latents.shape[0]
 
                 # get noisy model input and timesteps
-                noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
-                    args, noise_scheduler_copy, latents, noise, accelerator.device, weight_dtype
+                noisy_model_input, timesteps, sigmas = (
+                    flux_train_utils.get_noisy_model_input_and_timesteps(
+                        args,
+                        noise_scheduler_copy,
+                        latents,
+                        noise,
+                        accelerator.device,
+                        weight_dtype,
+                    )
                 )
 
                 # pack latents and get img_ids
-                packed_noisy_model_input = flux_utils.pack_latents(noisy_model_input)  # b, c, h*2, w*2 -> b, h*w, c*4
-                packed_latent_height, packed_latent_width = noisy_model_input.shape[2] // 2, noisy_model_input.shape[3] // 2
-                img_ids = flux_utils.prepare_img_ids(bsz, packed_latent_height, packed_latent_width).to(device=accelerator.device)
+                packed_noisy_model_input = flux_utils.pack_latents(
+                    noisy_model_input
+                )  # b, c, h*2, w*2 -> b, h*w, c*4
+                packed_latent_height, packed_latent_width = (
+                    noisy_model_input.shape[2] // 2,
+                    noisy_model_input.shape[3] // 2,
+                )
+                img_ids = flux_utils.prepare_img_ids(
+                    bsz, packed_latent_height, packed_latent_width
+                ).to(device=accelerator.device)
 
                 # get guidance: ensure args.guidance_scale is float
-                guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device)
+                guidance_vec = torch.full(
+                    (bsz,), float(args.guidance_scale), device=accelerator.device
+                )
 
                 # call model
                 l_pooled, t5_out, txt_ids, t5_attn_mask = text_encoder_conds
@@ -658,20 +798,30 @@ def train(args):
                     )
 
                 # unpack latents
-                model_pred = flux_utils.unpack_latents(model_pred, packed_latent_height, packed_latent_width)
+                model_pred = flux_utils.unpack_latents(
+                    model_pred, packed_latent_height, packed_latent_width
+                )
 
                 # apply model prediction type
-                model_pred, weighting = flux_train_utils.apply_model_prediction_type(args, model_pred, noisy_model_input, sigmas)
+                model_pred, weighting = flux_train_utils.apply_model_prediction_type(
+                    args, model_pred, noisy_model_input, sigmas
+                )
 
                 # flow matching loss: this is different from SD3
                 target = noise - latents
 
                 # calculate loss
-                huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
-                loss = train_util.conditional_loss(model_pred.float(), target.float(), args.loss_type, "none", huber_c)
+                huber_c = train_util.get_huber_threshold_if_needed(
+                    args, timesteps, noise_scheduler
+                )
+                loss = train_util.conditional_loss(
+                    model_pred.float(), target.float(), args.loss_type, "none", huber_c
+                )
                 if weighting is not None:
                     loss = loss * weighting
-                if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                if args.masked_loss or (
+                    "alpha_masks" in batch and batch["alpha_masks"] is not None
+                ):
                     loss = apply_masked_loss(loss, batch)
                 loss = loss.mean([1, 2, 3])
 
@@ -706,11 +856,21 @@ def train(args):
 
                 optimizer_eval_fn()
                 flux_train_utils.sample_images(
-                    accelerator, args, None, global_step, flux, ae, [clip_l, t5xxl], sample_prompts_te_outputs
+                    accelerator,
+                    args,
+                    None,
+                    global_step,
+                    flux,
+                    ae,
+                    [clip_l, t5xxl],
+                    sample_prompts_te_outputs,
                 )
 
                 # 指定ステップごとにモデルを保存
-                if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                if (
+                    args.save_every_n_steps is not None
+                    and global_step % args.save_every_n_steps == 0
+                ):
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         flux_train_utils.save_flux_model_on_epoch_end_or_stepwise(
@@ -728,7 +888,9 @@ def train(args):
             current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
             if len(accelerator.trackers) > 0:
                 logs = {"loss": current_loss}
-                train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
+                train_util.append_lr_to_logs(
+                    logs, lr_scheduler, args.optimizer_type, including_unet=True
+                )
 
                 accelerator.log(logs, step=global_step)
 
@@ -761,7 +923,14 @@ def train(args):
                 )
 
         flux_train_utils.sample_images(
-            accelerator, args, epoch + 1, global_step, flux, ae, [clip_l, t5xxl], sample_prompts_te_outputs
+            accelerator,
+            args,
+            epoch + 1,
+            global_step,
+            flux,
+            ae,
+            [clip_l, t5xxl],
+            sample_prompts_te_outputs,
         )
         optimizer_train_fn()
 
@@ -778,13 +947,18 @@ def train(args):
     del accelerator  # この後メモリを使うのでこれは消す
 
     if is_main_process:
-        flux_train_utils.save_flux_model_on_train_end(args, save_dtype, epoch, global_step, flux)
+        flux_train_utils.save_flux_model_on_train_end(
+            args, save_dtype, epoch, global_step, flux
+        )
         logger.info("model saved.")
 
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-
+    parser.add_argument(
+        "--log_stream_client_id",
+        type=str,
+    )
     add_logging_arguments(parser)
     train_util.add_sd_models_arguments(parser)  # TODO split this
     train_util.add_dataset_arguments(parser, True, True, True)
@@ -840,11 +1014,32 @@ def setup_parser() -> argparse.ArgumentParser:
     return parser
 
 
+import sys
+from contextlib import contextmanager
+
+
+@contextmanager
+def redirect_output(log_stream):
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = log_stream
+    sys.stderr = log_stream
+    try:
+        yield
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+
+
 if __name__ == "__main__":
     parser = setup_parser()
-
     args = parser.parse_args()
     train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
-
-    train(args)
+    print("Sending training logs to client id: " + str(args.log_stream_client_id))
+    if not args.log_stream_client_id:
+        train(args)
+    else:
+        log_stream = LogStream(client_id=str(args.log_stream_client_id))
+        with redirect_output(log_stream):
+            train(args)

@@ -216,60 +216,63 @@ def sample_image_inference(
     weight_dtype = ae.dtype  # TOFO give dtype as argument
     packed_latent_height = height // 16
     packed_latent_width = width // 16
-    noise = torch.randn(
-        1,
-        packed_latent_height * packed_latent_width,
-        16 * 2 * 2,
-        device=accelerator.device,
-        dtype=weight_dtype,
-        generator=torch.Generator(device=accelerator.device).manual_seed(seed) if seed is not None else None,
-    )
-    timesteps = get_schedule(sample_steps, noise.shape[1], shift=True)  # FLUX.1 dev -> shift=True
-    img_ids = flux_utils.prepare_img_ids(1, packed_latent_height, packed_latent_width).to(accelerator.device, weight_dtype)
-    t5_attn_mask = t5_attn_mask.to(accelerator.device) if args.apply_t5_attn_mask else None
+    for i in range(4):
+        noise = torch.randn(
+            1,
+            packed_latent_height * packed_latent_width,
+            16 * 2 * 2,
+            device=accelerator.device,
+            dtype=weight_dtype,
+            generator=torch.Generator(device=accelerator.device).manual_seed(seed) if seed is not None else None,
+        )
+        timesteps = get_schedule(sample_steps, noise.shape[1], shift=True)  # FLUX.1 dev -> shift=True
+        img_ids = flux_utils.prepare_img_ids(1, packed_latent_height, packed_latent_width).to(accelerator.device, weight_dtype)
+        t5_attn_mask = t5_attn_mask.to(accelerator.device) if args.apply_t5_attn_mask else None
 
-    if controlnet_image is not None:
-        controlnet_image = Image.open(controlnet_image).convert("RGB")
-        controlnet_image = controlnet_image.resize((width, height), Image.LANCZOS)
-        controlnet_image = torch.from_numpy((np.array(controlnet_image) / 127.5) - 1)
-        controlnet_image = controlnet_image.permute(2, 0, 1).unsqueeze(0).to(weight_dtype).to(accelerator.device)
+        if controlnet_image is not None:
+            controlnet_image = Image.open(controlnet_image).convert("RGB")
+            controlnet_image = controlnet_image.resize((width, height), Image.LANCZOS)
+            controlnet_image = torch.from_numpy((np.array(controlnet_image) / 127.5) - 1)
+            controlnet_image = controlnet_image.permute(2, 0, 1).unsqueeze(0).to(weight_dtype).to(accelerator.device)
 
-    with accelerator.autocast(), torch.no_grad():
-        x = denoise(flux, noise, img_ids, t5_out, txt_ids, l_pooled, timesteps=timesteps, guidance=scale, t5_attn_mask=t5_attn_mask, controlnet=controlnet, controlnet_img=controlnet_image)
+        with accelerator.autocast(), torch.no_grad():
+            x = denoise(flux, noise, img_ids, t5_out, txt_ids, l_pooled, timesteps=timesteps, guidance=scale, t5_attn_mask=t5_attn_mask, controlnet=controlnet, controlnet_img=controlnet_image)
 
-    x = flux_utils.unpack_latents(x, packed_latent_height, packed_latent_width)
+        x = flux_utils.unpack_latents(x, packed_latent_height, packed_latent_width)
 
-    # latent to image
-    clean_memory_on_device(accelerator.device)
-    org_vae_device = ae.device  # will be on cpu
-    ae.to(accelerator.device)  # distributed_state.device is same as accelerator.device
-    with accelerator.autocast(), torch.no_grad():
-        x = ae.decode(x)
-    ae.to(org_vae_device)
-    clean_memory_on_device(accelerator.device)
+        # latent to image
+        clean_memory_on_device(accelerator.device)
+        org_vae_device = ae.device  # will be on cpu
+        ae.to(accelerator.device)  # distributed_state.device is same as accelerator.device
+        with accelerator.autocast(), torch.no_grad():
+            x = ae.decode(x)
+        ae.to(org_vae_device)
+        clean_memory_on_device(accelerator.device)
 
-    x = x.clamp(-1, 1)
-    x = x.permute(0, 2, 3, 1)
-    image = Image.fromarray((127.5 * (x + 1.0)).float().cpu().numpy().astype(np.uint8)[0])
+        x = x.clamp(-1, 1)
+        x = x.permute(0, 2, 3, 1)
+        image = Image.fromarray((127.5 * (x + 1.0)).float().cpu().numpy().astype(np.uint8)[0])
 
-    # adding accelerator.wait_for_everyone() here should sync up and ensure that sample images are saved in the same order as the original prompt list
-    # but adding 'enum' to the filename should be enough
+        # adding accelerator.wait_for_everyone() here should sync up and ensure that sample images are saved in the same order as the original prompt list
+        # but adding 'enum' to the filename should be enough
 
-    ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
-    num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-    seed_suffix = "" if seed is None else f"_{seed}"
-    i: int = prompt_dict["enum"]
-    img_filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{ts_str}{seed_suffix}.png"
-    image.save(os.path.join(save_dir, img_filename))
+        ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
+        num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+        seed_suffix = "" if seed is None else f"_{seed}"
+        i: int = prompt_dict["enum"]
+        img_filename = f"{'' if args.output_name is None else args.output_name + '-'}{num_suffix}-{i:02d}-{ts_str}{seed_suffix}.png"
+        os.makedirs(os.path.join(save_dir, str(epoch)), exist_ok=True)
+        # Add steps as folder
+        image.save(os.path.join(save_dir, str(epoch), img_filename))
 
-    # send images to wandb if enabled
-    if "wandb" in [tracker.name for tracker in accelerator.trackers]:
-        wandb_tracker = accelerator.get_tracker("wandb")
+        # send images to wandb if enabled
+        if "wandb" in [tracker.name for tracker in accelerator.trackers]:
+            wandb_tracker = accelerator.get_tracker("wandb")
 
-        import wandb
+            import wandb
 
-        # not to commit images to avoid inconsistency between training and logging steps
-        wandb_tracker.log({f"sample_{i}": wandb.Image(image, caption=prompt)}, commit=False)  # positive prompt as a caption
+            # not to commit images to avoid inconsistency between training and logging steps
+            wandb_tracker.log({f"sample_{i}": wandb.Image(image, caption=prompt)}, commit=False)  # positive prompt as a caption
 
 
 def time_shift(mu: float, sigma: float, t: torch.Tensor):

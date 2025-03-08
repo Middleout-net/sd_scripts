@@ -252,198 +252,13 @@ def generate_image(
     return output_path
 
 
-def generate_sd3_image(
-    ckpt_path,
-    clip_l_path,
-    clip_g_path,
-    t5xxl_path,
-    t5xxl_token_length,
-    prompt,
-    negative_prompt,
-    seed,
-    steps,
-    width,
-    height,
-    output_dir,
-    cfg_scale,
-    offload=False,
-    lora_weights=None,
-    cancel_flag=[],
-):
-    device = get_preferred_device()
-    fake_args = [
-        "--ckpt_path",
-        ckpt_path,
-        "--clip_l",
-        clip_l_path,
-        "--clip_g",
-        clip_g_path,
-        "--t5xxl",
-        t5xxl_path,
-        "--t5xxl_token_length",
-        str(t5xxl_token_length),
-        "--prompt",
-        prompt,
-        "--negative_prompt",
-        negative_prompt,
-        "--seed",
-        str(seed),
-        "--steps",
-        str(steps),
-        "--width",
-        str(width),
-        "--height",
-        str(height),
-        "--output_dir",
-        output_dir,
-        "--cfg_scale",
-        str(cfg_scale),
-    ]
-    # Add optional arguments based on their conditions
-    if offload:
-        fake_args.append("--offload")
-    if lora_weights:
-        fake_args.extend(["--lora_weights"] + (lora_weights if isinstance(lora_weights, list) else [lora_weights]))
-    # fake_args.append("--merge_lora_weights")
-    # Parse the simulated arguments
-    # Define the argument parser
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt_path", type=str, required=True)
-    parser.add_argument("--clip_g", type=str, required=False)
-    parser.add_argument("--clip_l", type=str, required=False)
-    parser.add_argument("--t5xxl", type=str, required=False)
-    parser.add_argument(
-        "--t5xxl_token_length",
-        type=int,
-        default=256,
-        help="t5xxl token length, default: 256",
-    )
-    parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--apply_lg_attn_mask", action="store_true")
-    parser.add_argument("--apply_t5_attn_mask", action="store_true")
-    parser.add_argument("--prompt", type=str, default="A photo of a cat")
-    parser.add_argument("--negative_prompt", type=str, default="")
-    parser.add_argument("--cfg_scale", type=float, default=5.0)
-    parser.add_argument("--offload", action="store_true", help="Offload to CPU")
-    parser.add_argument("--output_dir", type=str, default=".")
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--steps", type=int, default=50)
-    parser.add_argument(
-        "--merge_lora_weights", action="store_true", help="Merge LoRA weights to model"
-    )
-    parser.add_argument(
-        "--lora_weights", type=str, nargs="*", default=[], help="LoRA weights"
-    )
-    parser.add_argument("--width", type=int, required=True)
-    parser.add_argument("--height", type=int, required=True)
-    # Parse the simulated arguments
-    args = parser.parse_args(fake_args)
-    # Load state dict
-    state_dict = load_safetensors(
-        ckpt_path, device, disable_mmap=True, dtype=torch.float32
-    )
-
-    # Load text encoders
-    clip_l = sd3_utils.load_clip_l(
-        clip_l_path, torch.float32, device, state_dict=state_dict
-    )
-    clip_g = sd3_utils.load_clip_g(
-        clip_g_path, torch.float32, device, state_dict=state_dict
-    )
-    t5xxl = sd3_utils.load_t5xxl(
-        t5xxl_path, torch.float32, device, state_dict=state_dict
-    )
-
-    # MMDiT and VAE
-    vae = sd3_utils.load_vae(None, torch.float32, device, state_dict=state_dict)
-    mmdit = sd3_utils.load_mmdit(state_dict, torch.float32, device)
-
-    # Move models to the device
-    clip_l.to(device)
-    clip_g.to(device)
-    t5xxl.to(device)
-    vae.to(device)
-    mmdit.to(device)
-
-    if not offload:
-        clip_l.to(device)
-        clip_g.to(device)
-        t5xxl.to(device)
-        vae.to(device)
-        mmdit.to(device)
-
-    clip_l.eval()
-    clip_g.eval()
-    t5xxl.eval()
-    mmdit.eval()
-    vae.eval()
-
-    logger.info("Loading tokenizers...")
-    tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(t5xxl_token_length)
-    encoding_strategy = strategy_sd3.Sd3TextEncodingStrategy()
-
-    for weights_file in args.lora_weights:
-        if ";" in weights_file:
-            weights_file, multiplier = weights_file.split(";")
-            multiplier = float(multiplier)
-        else:
-            multiplier = 1.0
-
-        weights_sd = load_file(weights_file)
-        module = lora_sd3
-        lora_model, _ = module.create_network_from_weights(
-            multiplier, None, vae, [clip_l, clip_g, t5xxl], mmdit, weights_sd, True
-        )
-
-        if args.merge_lora_weights:
-            lora_model.merge_to([clip_l, clip_g, t5xxl], mmdit, weights_sd)
-        else:
-            lora_model.apply_to([clip_l, clip_g, t5xxl], mmdit)
-            info = lora_model.load_state_dict(weights_sd, strict=True)
-            logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
-            lora_model.eval()
-            lora_model.to(device)
-    sd3_dtype = torch.float32
-    if args.fp16:
-        sd3_dtype = torch.float16
-    elif args.bf16:
-        sd3_dtype = torch.bfloat16
-    # Generate image
-    return generate_image(
-        mmdit,
-        vae,
-        clip_l,
-        clip_g,
-        t5xxl,
-        steps,
-        prompt,
-        seed,
-        width,
-        height,
-        device,
-        negative_prompt,
-        cfg_scale,
-        tokenize_strategy,
-        encoding_strategy,
-        args,
-        sd3_dtype,
-        cancel_flag=cancel_flag,
-    )
-
 def sd3_prepare_generation(
     ckpt_path,
     clip_l_path,
     clip_g_path,
     t5xxl_path,
     t5xxl_token_length,
-    prompt,
-    negative_prompt,
-    steps,
-    width,
-    height,
     output_dir,
-    cfg_scale,
     offload=False,
     lora_weights=None,
 ):
@@ -517,20 +332,8 @@ def sd3_prepare_generation(
         t5xxl_path,
         "--t5xxl_token_length",
         str(t5xxl_token_length),
-        "--prompt",
-        prompt,
-        "--negative_prompt",
-        negative_prompt,
-        "--steps",
-        str(steps),
-        "--width",
-        str(width),
-        "--height",
-        str(height),
         "--output_dir",
         output_dir,
-        "--cfg_scale",
-        str(cfg_scale),
     ]
     # Add optional arguments based on their conditions
     if offload:
@@ -553,21 +356,14 @@ def sd3_prepare_generation(
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--apply_lg_attn_mask", action="store_true")
     parser.add_argument("--apply_t5_attn_mask", action="store_true")
-    parser.add_argument("--prompt", type=str, default="A photo of a cat")
-    parser.add_argument("--negative_prompt", type=str, default="")
-    parser.add_argument("--cfg_scale", type=float, default=5.0)
     parser.add_argument("--offload", action="store_true", help="Offload to CPU")
     parser.add_argument("--output_dir", type=str, default=".")
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--steps", type=int, default=50)
     parser.add_argument(
         "--merge_lora_weights", action="store_true", help="Merge LoRA weights to model"
     )
     parser.add_argument(
         "--lora_weights", type=str, nargs="*", default=[], help="LoRA weights"
     )
-    parser.add_argument("--width", type=int, required=True)
-    parser.add_argument("--height", type=int, required=True)
     # Parse the simulated arguments
     args = parser.parse_args(fake_args)
     
@@ -578,15 +374,9 @@ def sd3_prepare_generation(
         "clip_g": clip_g,
         "t5xxl": t5xxl,
         "device": device,
-        "prompt": prompt,
         "seed": -1,
-        "width": width,
-        "height": height,
-        "negative_prompt": negative_prompt,
-        "cfg_scale": cfg_scale,
         "tokenize_strategy": tokenize_strategy,
         "encoding_strategy": encoding_strategy,
-        "steps": steps,
         "sd3_dtype": sd3_dtype,
         "args":args
         
