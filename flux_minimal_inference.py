@@ -79,6 +79,8 @@ def denoise(
     neg_vec: Optional[torch.Tensor] = None,
     neg_t5_attn_mask: Optional[torch.Tensor] = None,
     cfg_scale: Optional[float] = None,
+    cancel_flag: Optional[list] = [],
+
 ):
     # this is ignored for schnell
     logger.info(f"guidance: {guidance}, cfg_scale: {cfg_scale}")
@@ -104,6 +106,9 @@ def denoise(
         b_t5_attn_mask = t5_attn_mask
 
     for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
+        if cancel_flag is not None and len(cancel_flag)>0:
+            logger.info(f"Operation cancelled at step {i}/{steps}.")
+            return None # return None to indicate cancellation
         t_vec = torch.full(
             (b_img_ids.shape[0],), t_curr, dtype=img.dtype, device=img.device
         )
@@ -153,6 +158,7 @@ def do_sample(
     neg_t5_out: Optional[torch.Tensor] = None,
     neg_t5_attn_mask: Optional[torch.Tensor] = None,
     cfg_scale: Optional[float] = None,
+    cancel_flag: Optional[list] = []
 ):
     logger.info(f"num_steps: {num_steps}")
     timesteps = get_schedule(num_steps, img.shape[1], shift=not is_schnell)
@@ -174,6 +180,7 @@ def do_sample(
                 neg_l_pooled,
                 neg_t5_attn_mask,
                 cfg_scale,
+                cancel_flag
             )
     else:
         with torch.autocast(device_type=device.type, dtype=flux_dtype), torch.no_grad():
@@ -191,6 +198,7 @@ def do_sample(
                 neg_l_pooled,
                 neg_t5_attn_mask,
                 cfg_scale,
+                cancel_flag
             )
 
     return x
@@ -372,7 +380,10 @@ def generate_image(
         neg_t5_out,
         neg_t5_attn_mask,
         cfg_scale,
+        cancel_flag
     )
+    if x is None:
+        return None # canceled 
     if args.offload:
         model = model.cpu()
     # del model
