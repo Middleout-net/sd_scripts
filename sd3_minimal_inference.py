@@ -317,6 +317,8 @@ def sd3_prepare_generation(
         )
 
         lora_model.apply_to([clip_l, clip_g, t5xxl], mmdit)
+        info = lora_model.load_state_dict(weights_sd, strict=True)
+        logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
         lora_model.eval()
         lora_model.to(device)
 
