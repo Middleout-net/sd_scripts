@@ -17,7 +17,7 @@ from library.utils import setup_logging
 
 setup_logging()
 import logging
-
+from log_stream import LogStream
 logger = logging.getLogger(__name__)
 
 
@@ -474,6 +474,20 @@ def setup_parser() -> argparse.ArgumentParser:
     sd3_train_utils.add_sd3_training_arguments(parser)
     return parser
 
+import sys
+from contextlib import contextmanager
+
+@contextmanager
+def redirect_output(log_stream):
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = log_stream
+    sys.stderr = log_stream
+    try:
+        yield
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
 
 if __name__ == "__main__":
     parser = setup_parser()
@@ -483,4 +497,10 @@ if __name__ == "__main__":
     args = train_util.read_config_from_file(args, parser)
 
     trainer = Sd3NetworkTrainer()
-    trainer.train(args)
+    print("Sending training logs to client id: "+str(args.log_stream_client_id))
+    if args.log_stream_client_id==-1:
+        trainer.train(args)
+    else:
+        log_stream = LogStream(client_id=str(args.log_stream_client_id))
+        with redirect_output(log_stream):
+            trainer.train(args)

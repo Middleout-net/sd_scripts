@@ -31,7 +31,7 @@ from library.utils import setup_logging, add_logging_arguments
 setup_logging()
 import logging
 
-from log_stream import LogStream,LogStreamHandler
+from log_stream import LogStream
 
 logger = logging.getLogger(__name__)
 
