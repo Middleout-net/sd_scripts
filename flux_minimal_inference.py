@@ -104,11 +104,10 @@ def denoise(
         b_txt = txt
         b_vec = vec
         b_t5_attn_mask = t5_attn_mask
-
-    for i, (t_curr, t_prev) in enumerate(zip(tqdm(timesteps[:-1]), timesteps[1:])):
-        if cancel_flag is not None and len(cancel_flag)>0:
-            logger.info(f"Operation cancelled at step {i}/{len(timesteps)-1}.")
-            return None # return None to indicate cancellation
+        for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
+            if cancel_flag is not None and len(cancel_flag)>0:
+                logger.info(f"Operation cancelled")
+                return None # return None to indicate cancellation
         t_vec = torch.full(
             (b_img_ids.shape[0],), t_curr, dtype=img.dtype, device=img.device
         )
