@@ -42,7 +42,7 @@ def get_noise(seed, latent, device="cpu"):
     )
 
 
-def get_sigmas(sampling: sd3_utils.ModelSamplingDiscreteFlow, steps):
+def get_all_sigmas(sampling: sd3_utils.ModelSamplingDiscreteFlow, steps):
     start = sampling.timestep(sampling.sigma_max)
     end = sampling.timestep(sampling.sigma_min)
     timesteps = torch.linspace(start, end, steps)
@@ -71,7 +71,7 @@ def do_sample(
     steps: int,
     cfg_scale: float,
     dtype: torch.dtype,
-    device: str,
+    device: torch.device,
     vae: Optional[sd3_models.SDVAE] = None,
     cancel_flag: list = [],
 ):
@@ -87,7 +87,7 @@ def do_sample(
 
     model_sampling = sd3_utils.ModelSamplingDiscreteFlow(shift=3.0)  # 3.0 is for SD3
 
-    sigmas = get_sigmas(model_sampling, steps).to(device)
+    sigmas = get_all_sigmas(model_sampling, steps).to(device)
     # sigmas = sigmas[int(steps * (1 - denoise)) :] # do not support i2i
 
     # conditioning = fix_cond(conditioning)
@@ -104,40 +104,46 @@ def do_sample(
     x = noise_scaled.to(device).to(dtype)
     # print(x.shape)
 
-    with torch.no_grad():
-        for i in tqdm(range(len(sigmas) - 1)):
-            if len(cancel_flag)>0:
-                logger.info(f"Operation cancelled at step {i}/{steps}.")
-                return None # return None to indicate cancellation
-            sigma_hat = sigmas[i]
+    # Remove torch.no_grad() from here to match training behavior
+    for i in tqdm(range(len(sigmas) - 1)):
+        if len(cancel_flag)>0:
+            logger.info(f"Operation cancelled at step {i}/{steps}.")
+            return None # return None to indicate cancellation
+        sigma_hat = sigmas[i]
 
-            timestep = model_sampling.timestep(sigma_hat).float()
-            timestep = torch.FloatTensor([timestep, timestep]).to(device)
+        timestep = model_sampling.timestep(sigma_hat).float()
+        timestep = torch.FloatTensor([timestep, timestep]).to(device)
 
-            x_c_nc = torch.cat([x, x], dim=0)
-            # print(x_c_nc.shape, timestep.shape, c_crossattn.shape, y.shape)
+        x_c_nc = torch.cat([x, x], dim=0)
+        # print(x_c_nc.shape, timestep.shape, c_crossattn.shape, y.shape)
 
-            with torch.autocast(device_type=device.type, dtype=dtype):
-                model_output = mmdit(x_c_nc, timestep, context=c_crossattn, y=y)
-            model_output = model_output.float()
-            batched = model_sampling.calculate_denoised(sigma_hat, model_output, x)
+        # Add block swap preparation like in training
+        if hasattr(mmdit, 'prepare_block_swap_before_forward'):
+            mmdit.prepare_block_swap_before_forward()
+        model_output = mmdit(x_c_nc, timestep, context=c_crossattn, y=y)
+        model_output = model_output.float()
+        batched = model_sampling.calculate_denoised(sigma_hat, model_output, x)
 
-            pos_out, neg_out = batched.chunk(2)
-            denoised = neg_out + (pos_out - neg_out) * cfg_scale
-            # print(denoised.shape)
+        pos_out, neg_out = batched.chunk(2)
+        denoised = neg_out + (pos_out - neg_out) * cfg_scale
+        # print(denoised.shape)
 
-            # d = to_d(x, sigma_hat, denoised)
-            dims_to_append = x.ndim - sigma_hat.ndim
-            sigma_hat_dims = sigma_hat[(...,) + (None,) * dims_to_append]
-            # print(dims_to_append, x.shape, sigma_hat.shape, denoised.shape, sigma_hat_dims.shape)
-            """Converts a denoiser output to a Karras ODE derivative."""
-            d = (x - denoised) / sigma_hat_dims
+        # d = to_d(x, sigma_hat, denoised)
+        dims_to_append = x.ndim - sigma_hat.ndim
+        sigma_hat_dims = sigma_hat[(...,) + (None,) * dims_to_append]
+        # print(dims_to_append, x.shape, sigma_hat.shape, denoised.shape, sigma_hat_dims.shape)
+        """Converts a denoiser output to a Karras ODE derivative."""
+        d = (x - denoised) / sigma_hat_dims
 
-            dt = sigmas[i + 1] - sigma_hat
+        dt = sigmas[i + 1] - sigma_hat
 
-            # Euler method
-            x = x + d * dt
-            x = x.to(dtype)
+        # Euler method
+        x = x + d * dt
+        x = x.to(dtype)
+
+    # Add final block swap preparation like in training
+    if hasattr(mmdit, 'prepare_block_swap_before_forward'):
+        mmdit.prepare_block_swap_before_forward()
 
     latent = x
     latent = vae.process_out(latent)
@@ -155,7 +161,7 @@ def generate_image(
     seed: int,
     target_width: int,
     target_height: int,
-    device: str,
+    device: torch.device,
     negative_prompt: str,
     cfg_scale: float,
     tokenize_strategy: Optional[strategy_sd3.Sd3TokenizeStrategy] = None,
@@ -167,10 +173,11 @@ def generate_image(
     # prepare embeddings
     logger.info("Encoding prompts...")
 
-    # TODO support one-by-one offloading
-    clip_l.to(device)
-    clip_g.to(device)
-    t5xxl.to(device)
+    # Keep text encoders on device during encoding for better performance
+    if not args.offload:
+        clip_l.to(device)
+        clip_g.to(device)
+        t5xxl.to(device)
 
     with torch.autocast(device_type=device.type, dtype=mmdit.dtype), torch.no_grad():
         tokens_and_masks = tokenize_strategy.tokenize(prompt)
@@ -206,29 +213,38 @@ def generate_image(
 
     # generate image
     logger.info("Generating image...")
-    mmdit.to(device)
-    latent_sampled = do_sample(
-        target_height,
-        target_width,
-        None,
-        seed,
-        cond,
-        neg_cond,
-        mmdit,
-        steps,
-        cfg_scale,
-        sd3_dtype,
-        device,
-        vae,
-        cancel_flag
-    )
+    # Move mmdit to device if not already there and ensure it stays there during sampling
+    if not args.offload:
+        mmdit.to(device)
+    
+    # Use the same autocast pattern as training for better performance  
+    # Training uses accelerator.autocast() which typically uses fp16/bf16 for mixed precision
+    # We should use fp16/bf16 for autocast, not float32
+    autocast_dtype = torch.float16 if sd3_dtype == torch.float16 else torch.bfloat16 if sd3_dtype == torch.bfloat16 else torch.float16
+    with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
+        latent_sampled = do_sample(
+            target_height,
+            target_width,
+            None,
+            seed,
+            cond,
+            neg_cond,
+            mmdit,
+            steps,
+            cfg_scale,
+            vae.dtype,  # Match training: use vae.dtype not sd3_dtype
+            device,
+            vae,
+            cancel_flag
+        )
     if latent_sampled is None:
         return None
     if args.offload:
         mmdit.to("cpu")
 
     # latent to image
-    vae.to(device)
+    if not args.offload:
+        vae.to(device)
     with torch.no_grad():
         image = vae.decode(latent_sampled)
 
@@ -262,7 +278,7 @@ def sd3_prepare_generation(
     offload=False,
     lora_weights=None,
 ):
-    device = get_preferred_device()
+    device = torch.device(get_preferred_device())
 
     # Load state dict
     state_dict = load_safetensors(
@@ -284,12 +300,13 @@ def sd3_prepare_generation(
     vae = sd3_utils.load_vae(None, torch.float32, device, state_dict=state_dict)
     mmdit = sd3_utils.load_mmdit(state_dict, torch.float32, device)
 
-    # Move models to the device
-    clip_l.to(device)
-    clip_g.to(device)
-    t5xxl.to(device)
-    vae.to(device)
-    mmdit.to(device)
+    # Move models to the device for better performance (unless offloading)
+    if not offload:
+        clip_l.to(device)
+        clip_g.to(device)
+        t5xxl.to(device)
+        vae.to(device)
+        mmdit.to(device)
 
     clip_l.eval()
     clip_g.eval()
@@ -320,7 +337,8 @@ def sd3_prepare_generation(
         info = lora_model.load_state_dict(weights_sd, strict=True)
         logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
         lora_model.eval()
-        lora_model.to(device)
+        if not offload:
+            lora_model.to(device)
 
     sd3_dtype = torch.float32
     fake_args = [
@@ -414,7 +432,7 @@ if __name__ == "__main__":
     # cfg_scale = 5
     # seed = 1  # None  # 1
 
-    device = get_preferred_device()
+    device = torch.device(get_preferred_device())
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt_path", type=str, required=True)
@@ -510,7 +528,8 @@ if __name__ == "__main__":
 
     # load tokenizers
     logger.info("Loading tokenizers...")
-    tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(args.t5xxl_token_length)
+    tokenizers_folder = os.path.dirname(args.clip_l) if args.clip_l else "."
+    tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(args.t5xxl_token_length, tokenizers_folder)
     encoding_strategy = strategy_sd3.Sd3TextEncodingStrategy()
 
     # LoRA
@@ -535,7 +554,8 @@ if __name__ == "__main__":
             info = lora_model.load_state_dict(weights_sd, strict=True)
             logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
             lora_model.eval()
-            lora_model.to(device)
+            if not args.offload:
+                lora_model.to(device)
 
         lora_models.append(lora_model)
 
@@ -554,6 +574,10 @@ if __name__ == "__main__":
             device,
             args.negative_prompt,
             args.cfg_scale,
+            tokenize_strategy,
+            encoding_strategy,
+            args,
+            sd3_dtype,
         )
     else:
         # loop for interactive
@@ -625,6 +649,10 @@ if __name__ == "__main__":
                     else args.negative_prompt
                 ),
                 cfg_scale,
+                tokenize_strategy,
+                encoding_strategy,
+                args,
+                sd3_dtype,
             )
 
     logger.info("Done!")
