@@ -500,7 +500,7 @@ def flux_prepare_generation(
     ae = flux_utils.load_ae(ae_path, ae_dtype, loading_device)
 
     lora_models: List[lora_flux.LoRANetwork] = []
-    for weights_file in lora_weights:
+    for weights_file in (lora_weights or []):
         if ";" in weights_file:
             weights_file, multiplier = weights_file.split(";")
             multiplier = float(multiplier)
@@ -540,11 +540,11 @@ def flux_prepare_generation(
         fake_args.append("--offload")
     if apply_t5_attn_mask:
         fake_args.append("--apply_t5_attn_mask")
-    if lora_weights:
-        fake_args.extend(
-            ["--lora_weights"]
-            + (lora_weights if isinstance(lora_weights, list) else [lora_weights])
-        )
+    # if lora_weights:
+    #     fake_args.extend(
+    #         ["--lora_weights"]
+    #         + (lora_weights if isinstance(lora_weights, list) else [lora_weights])
+    #     )
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply_t5_attn_mask", action="store_true")
     parser.add_argument("--offload", action="store_true", help="Offload to CPU")
