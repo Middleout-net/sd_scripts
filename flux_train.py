@@ -236,8 +236,8 @@ def train(args):
             t5xxl_max_token_length = 512
     else:
         t5xxl_max_token_length = args.t5xxl_max_token_length
-
-    flux_tokenize_strategy = strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length)
+    tokenizers_folder=os.path.dirname(args.clip_l)
+    flux_tokenize_strategy = strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length,tokenizers_folder)
     strategy_base.TokenizeStrategy.set_strategy(flux_tokenize_strategy)
 
     # load clip_l, t5xxl for caching text encoder outputs
