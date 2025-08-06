@@ -18,7 +18,8 @@ from safetensors.torch import load_file
 
 from library import device_utils
 from library.device_utils import init_ipex, get_preferred_device
-from networks import oft_flux
+from networks import oft_flux, clora_flux
+import networks.clora_engine as clora_engine
 
 init_ipex()
 
@@ -80,63 +81,104 @@ def denoise(
     neg_t5_attn_mask: Optional[torch.Tensor] = None,
     cfg_scale: Optional[float] = None,
     cancel_flag: Optional[list] = [],
-
+    lora_models: Optional[list] = [],
+    clora_mode: str = "soft",
+    clora_tau: float = 0.07,
+    mask_interval: int = 1,
 ):
-    # this is ignored for schnell
-    logger.info(f"guidance: {guidance}, cfg_scale: {cfg_scale}")
-    guidance_vec = torch.full(
-        (img.shape[0],), guidance, device=img.device, dtype=img.dtype
-    )
-
-    # prepare classifier free guidance
-    if neg_txt is not None and neg_vec is not None:
-        b_img_ids = torch.cat([img_ids, img_ids], dim=0)
-        b_txt_ids = torch.cat([txt_ids, txt_ids], dim=0)
-        b_txt = torch.cat([neg_txt, txt], dim=0)
-        b_vec = torch.cat([neg_vec, vec], dim=0)
-        if t5_attn_mask is not None and neg_t5_attn_mask is not None:
-            b_t5_attn_mask = torch.cat([neg_t5_attn_mask, t5_attn_mask], dim=0)
-        else:
-            b_t5_attn_mask = None
+    use_clora = len(lora_models) >= 2
+    if use_clora:
+        collector = clora_engine.AttentionCollector(model.hidden_size, model.num_heads)
+        collector.attach(model)
+        # Disable all LoRAs initially; we will enable them one-by-one during inference
+        for lm in lora_models:
+            if hasattr(lm, "set_enabled"):
+                lm.set_enabled(False)
     else:
-        b_img_ids = img_ids
-        b_txt_ids = txt_ids
-        b_txt = txt
-        b_vec = vec
-        b_t5_attn_mask = t5_attn_mask
-    for t_curr, t_prev in zip(tqdm(timesteps[:-1]), timesteps[1:]):
-        if cancel_flag is not None and len(cancel_flag)>0:
-            logger.info(f"Operation cancelled")
-            return None # return None to indicate cancellation
-        t_vec = torch.full(
-            (b_img_ids.shape[0],), t_curr, dtype=img.dtype, device=img.device
-        )
+        collector = None
 
-        # classifier free guidance
+    try:
+        logger.info(f"guidance: {guidance}, cfg_scale: {cfg_scale}")
+        guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
+
         if neg_txt is not None and neg_vec is not None:
-            b_img = torch.cat([img, img], dim=0)
+            b_img_ids = torch.cat([img_ids, img_ids], dim=0)
+            b_txt_ids = torch.cat([txt_ids, txt_ids], dim=0)
+            b_txt = torch.cat([neg_txt, txt], dim=0)
+            b_vec = torch.cat([neg_vec, vec], dim=0)
+            b_t5_attn_mask = torch.cat([neg_t5_attn_mask, t5_attn_mask], dim=0) if t5_attn_mask is not None and neg_t5_attn_mask is not None else None
         else:
-            b_img = img
+            b_img_ids, b_txt_ids, b_txt, b_vec, b_t5_attn_mask = img_ids, txt_ids, txt, vec, t5_attn_mask
 
-        pred = model(
-            img=b_img,
-            img_ids=b_img_ids,
-            txt=b_txt,
-            txt_ids=b_txt_ids,
-            y=b_vec,
-            timesteps=t_vec,
-            guidance=guidance_vec,
-            txt_attention_mask=b_t5_attn_mask,
-        )
+        current_masks = None
+        for step_idx, (t_curr, t_prev) in enumerate(zip(tqdm(timesteps[:-1]), timesteps[1:])):
+            if cancel_flag and cancel_flag[0]:
+                logger.info("Operation cancelled")
+                return None
 
-        # classifier free guidance
-        if neg_txt is not None and neg_vec is not None:
-            pred_uncond, pred = torch.chunk(pred, 2, dim=0)
-            pred = pred_uncond + cfg_scale * (pred - pred_uncond)
+            t_vec = torch.full((b_img_ids.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+            b_img = torch.cat([img, img], dim=0) if neg_txt is not None and neg_vec is not None else img
 
-        img = img + (t_prev - t_curr) * pred
+            if use_clora:
+                preds_cpu = {}
+                collector.clear()
+                for idx, lm in enumerate(lora_models):
+                    name = getattr(lm, "lora_name", f"lora_{idx}")
+                    collector.set_active(name)
+                    lm.set_enabled(True)
+
+                    with torch.no_grad():
+                        pred = model(
+                            img=b_img,
+                            img_ids=b_img_ids,
+                            txt=b_txt,
+                            txt_ids=b_txt_ids,
+                            y=b_vec,
+                            timesteps=t_vec,
+                            guidance=guidance_vec,
+                            txt_attention_mask=b_t5_attn_mask,
+                        )
+
+                    lm.set_enabled(False)
+
+                    if neg_txt is not None and neg_vec is not None:
+                        pred_uncond, pred_cond = torch.chunk(pred, 2, dim=0)
+                        pred = pred_uncond + cfg_scale * (pred_cond - pred_uncond)
+
+                    preds_cpu[name] = pred.cpu()
+                    torch.cuda.empty_cache()
+
+                if step_idx % mask_interval == 0 or current_masks is None:
+                    current_masks = clora_engine.build_masks(collector.block_sums, mode=clora_mode, tau=clora_tau)
+                pred = clora_engine.fuse(preds_cpu, current_masks).to(img.device)
+
+                # Clean up CPU tensors to free memory
+                del preds_cpu
+            else:
+                with torch.no_grad():
+                    pred = model(
+                        img=b_img,
+                        img_ids=b_img_ids,
+                        txt=b_txt,
+                        txt_ids=b_txt_ids,
+                        y=b_vec,
+                        timesteps=t_vec,
+                        guidance=guidance_vec,
+                        txt_attention_mask=b_t5_attn_mask,
+                    )
+
+                if neg_txt is not None and neg_vec is not None:
+                    pred_uncond, pred_cond = torch.chunk(pred, 2, dim=0)
+                    pred = pred_uncond + cfg_scale * (pred_cond - pred_uncond)
+
+            img = img + (t_prev - t_curr) * pred
+
+    finally:
+        if use_clora and collector is not None:
+            collector.detach()
 
     return img
+
 
 
 def do_sample(
@@ -157,7 +199,11 @@ def do_sample(
     neg_t5_out: Optional[torch.Tensor] = None,
     neg_t5_attn_mask: Optional[torch.Tensor] = None,
     cfg_scale: Optional[float] = None,
-    cancel_flag: Optional[list] = []
+    cancel_flag: Optional[list] = [],
+    lora_models: Optional[list] = [],
+    clora_mode: str = "soft",
+    clora_tau: float = 0.07,
+    mask_interval: int = 1,
 ):
     logger.info(f"num_steps: {num_steps}")
     timesteps = get_schedule(num_steps, img.shape[1], shift=not is_schnell)
@@ -179,7 +225,11 @@ def do_sample(
                 neg_l_pooled,
                 neg_t5_attn_mask,
                 cfg_scale,
-                cancel_flag
+                cancel_flag,
+                lora_models,
+                clora_mode,
+                clora_tau,
+                mask_interval,
             )
     else:
         with torch.autocast(device_type=device.type, dtype=flux_dtype), torch.no_grad():
@@ -197,7 +247,11 @@ def do_sample(
                 neg_l_pooled,
                 neg_t5_attn_mask,
                 cfg_scale,
-                cancel_flag
+                cancel_flag,
+                lora_models,
+                clora_mode,
+                clora_tau,
+                mask_interval,
             )
 
     return x
@@ -228,6 +282,10 @@ def generate_image(
     accelerator: accelerate.Accelerator,
     args: Optional[argparse.Namespace] = None,
     cancel_flag: list = [],
+    lora_models: Optional[list] = [],
+    clora_mode: str = "soft",
+    clora_tau: float = 0.07,
+    mask_interval: int = 1,
 ):
     seed = seed if seed is not None else random.randint(0, 2**32 - 1)
     logger.info(f"Seed: {seed}")
@@ -379,7 +437,11 @@ def generate_image(
         neg_t5_out,
         neg_t5_attn_mask,
         cfg_scale,
-        cancel_flag
+        cancel_flag,
+        lora_models,
+        clora_mode,
+        clora_tau,
+        mask_interval,
     )
     if x is None:
         return None # canceled 
@@ -500,7 +562,7 @@ def flux_prepare_generation(
     ae = flux_utils.load_ae(ae_path, ae_dtype, loading_device)
 
     lora_models: List[lora_flux.LoRANetwork] = []
-    for weights_file in (lora_weights or []):
+    for i, weights_file in enumerate(lora_weights or []):
         if ";" in weights_file:
             weights_file, multiplier = weights_file.split(";")
             multiplier = float(multiplier)
@@ -521,6 +583,7 @@ def flux_prepare_generation(
         lora_model, _ = module.create_network_from_weights(
             multiplier, None, ae, [clip_l, t5xxl], model, weights_sd, True
         )
+        lora_model.lora_name = f"lora_{i}"
 
         if merge_lora_weights:
             lora_model.merge_to([clip_l, t5xxl], model, weights_sd)
@@ -568,6 +631,10 @@ def flux_prepare_generation(
         "is_schnell": is_schnell,
         "flux_dtype": flux_dtype,
         "ae_dtype": ae_dtype,
+        "lora_models": lora_models,
+        "clora_mode": "soft",
+        "clora_tau": 0.07,
+        "mask_interval": 1,
         "args": args,
     }
 
@@ -612,6 +679,10 @@ if __name__ == "__main__":
         help="Number of steps. Default is 4 for schnell, 50 for dev",
     )
     parser.add_argument("--guidance", type=float, default=3.5)
+    parser.add_argument("--clora_soft", action="store_true", help="Use soft mask (default)")
+    parser.add_argument("--clora_hard", action="store_true", help="Use hard argmax mask")
+    parser.add_argument("--clora_tau", type=float, default=0.07, help="Temperature for softmax masks")
+    parser.add_argument("--mask_interval", type=int, default=1, help="Recompute masks every k steps")
     parser.add_argument("--negative_prompt", type=str, default=None)
     parser.add_argument("--cfg_scale", type=float, default=1.0)
     parser.add_argument("--offload", action="store_true", help="Offload to CPU")
@@ -629,6 +700,9 @@ if __name__ == "__main__":
     parser.add_argument("--height", type=int, default=target_height)
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
+
+    # Determine CLoRA mode
+    clora_mode = "hard" if args.clora_hard else "soft"
 
     seed = args.seed
     steps = args.steps
@@ -698,7 +772,7 @@ if __name__ == "__main__":
 
     # LoRA
     lora_models: List[lora_flux.LoRANetwork] = []
-    for weights_file in args.lora_weights:
+    for i, weights_file in enumerate(args.lora_weights):
         if ";" in weights_file:
             weights_file, multiplier = weights_file.split(";")
             multiplier = float(multiplier)
@@ -719,6 +793,7 @@ if __name__ == "__main__":
         lora_model, _ = module.create_network_from_weights(
             multiplier, None, ae, [clip_l, t5xxl], model, weights_sd, True
         )
+        lora_model.lora_name = f"lora_{i}"
 
         if args.merge_lora_weights:
             lora_model.merge_to([clip_l, t5xxl], model, weights_sd)
@@ -745,6 +820,10 @@ if __name__ == "__main__":
             args.guidance,
             args.negative_prompt,
             args.cfg_scale,
+            lora_models=lora_models,
+            clora_mode=clora_mode,
+            clora_tau=args.clora_tau,
+            mask_interval=args.mask_interval,
         )
     else:
         # loop for interactive
@@ -812,6 +891,10 @@ if __name__ == "__main__":
                 guidance,
                 negative_prompt,
                 cfg_scale,
+                lora_models=lora_models,
+                clora_mode=clora_mode,
+                clora_tau=args.clora_tau,
+                mask_interval=args.mask_interval,
             )
 
     logger.info("Done!")
