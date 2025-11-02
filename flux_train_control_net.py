@@ -149,7 +149,7 @@ def train(args):
         t5xxl_max_token_length = (
             args.t5xxl_max_token_length if args.t5xxl_max_token_length is not None else (256 if is_schnell else 512)
         )
-        strategy_base.TokenizeStrategy.set_strategy(strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length))
+        strategy_base.TokenizeStrategy.set_strategy(strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length, args.tokenizer_cache_dir))
 
         train_dataset_group.set_current_strategies()
         train_util.debug_dataset(train_dataset_group, True)
@@ -203,7 +203,7 @@ def train(args):
     else:
         t5xxl_max_token_length = args.t5xxl_max_token_length
 
-    flux_tokenize_strategy = strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length)
+    flux_tokenize_strategy = strategy_flux.FluxTokenizeStrategy(t5xxl_max_token_length, args.tokenizer_cache_dir)
     strategy_base.TokenizeStrategy.set_strategy(flux_tokenize_strategy)
 
     # load clip_l, t5xxl for caching text encoder outputs

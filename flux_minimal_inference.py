@@ -661,6 +661,7 @@ if __name__ == "__main__":
     parser.add_argument("--clip_l", type=str, required=False)
     parser.add_argument("--t5xxl", type=str, required=False)
     parser.add_argument("--ae", type=str, required=False)
+    parser.add_argument("--tokenizer_cache_dir", type=str, default=None, help="directory for caching Tokenizer (for offline inference)")
     parser.add_argument("--apply_t5_attn_mask", action="store_true")
     parser.add_argument("--prompt", type=str, default="A photo of a cat")
     parser.add_argument("--output_dir", type=str, default=".")
@@ -761,7 +762,7 @@ if __name__ == "__main__":
     #         model = model.to("cpu")
 
     t5xxl_max_length = 256 if is_schnell else 512
-    tokenize_strategy = strategy_flux.FluxTokenizeStrategy(t5xxl_max_length)
+    tokenize_strategy = strategy_flux.FluxTokenizeStrategy(t5xxl_max_length, args.tokenizer_cache_dir)
     encoding_strategy = strategy_flux.FluxTextEncodingStrategy()
 
     # AE

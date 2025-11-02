@@ -22,8 +22,13 @@ T5_XXL_TOKENIZER_ID = "google/t5-v1_1-xxl"
 
 class FluxTokenizeStrategy(TokenizeStrategy):
     def __init__(self, t5xxl_max_length: int = 512, tokenizer_cache_dir: Optional[str] = None) -> None:
+        print(f"FluxTokenizeStrategy initialized with t5xxl_max_length: {t5xxl_max_length}")
         self.t5xxl_max_length = t5xxl_max_length
+        print(f"FluxTokenizeStrategy initialized with tokenizer_cache_dir: {tokenizer_cache_dir}")
+        print(f"FluxTokenizeStrategy initialized with CLIP_L_TOKENIZER_ID: {CLIP_L_TOKENIZER_ID}")
+        print(f"FluxTokenizeStrategy initialized with T5_XXL_TOKENIZER_ID: {T5_XXL_TOKENIZER_ID}")
         self.clip_l = self._load_tokenizer(CLIPTokenizer, CLIP_L_TOKENIZER_ID, tokenizer_cache_dir=tokenizer_cache_dir)
+        print(f"FluxTokenizeStrategy initialized with clip_l: {self.clip_l}")
         self.t5xxl = self._load_tokenizer(T5TokenizerFast, T5_XXL_TOKENIZER_ID, tokenizer_cache_dir=tokenizer_cache_dir)
 
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
@@ -236,7 +241,7 @@ class FluxLatentsCachingStrategy(LatentsCachingStrategy):
 if __name__ == "__main__":
     # test code for FluxTokenizeStrategy
     # tokenizer = sd3_models.SD3Tokenizer()
-    strategy = FluxTokenizeStrategy(256)
+    strategy = FluxTokenizeStrategy(256, tokenizer_cache_dir="/deployment/assets/assets/sd35_base_models")
     text = "hello world"
 
     l_tokens, g_tokens, t5_tokens = strategy.tokenize(text)
