@@ -16,6 +16,7 @@ from safetensors.torch import save_file
 
 from library import flux_models, flux_utils, strategy_base, train_util
 from library.device_utils import init_ipex, clean_memory_on_device
+from library.db_checkpoint_handler import save_checkpoint_to_db, extract_step_number_from_filename
 
 init_ipex()
 
@@ -493,6 +494,9 @@ def save_models(
     sai_metadata: Optional[dict],
     save_dtype: Optional[torch.dtype] = None,
     use_mem_eff_save: bool = False,
+    client_id: Optional[str] = None,
+    step_num: Optional[int] = None,
+    is_lora: bool = False,
 ):
     state_dict = {}
 
@@ -509,6 +513,20 @@ def save_models(
         save_file(state_dict, ckpt_path, metadata=sai_metadata)
     else:
         mem_eff_save_file(state_dict, ckpt_path, metadata=sai_metadata)
+    
+    # Save checkpoint metadata to database
+    if client_id is not None:
+        if step_num is None:
+            # Try to extract step number from filename
+            filename = os.path.basename(ckpt_path)
+            step_num = extract_step_number_from_filename(filename)
+        save_checkpoint_to_db(
+            checkpoint_path=ckpt_path,
+            model_id=client_id,
+            step_num=step_num,
+            is_lora=is_lora,
+            base_model='3'  # Flux1 base model
+        )
 
 
 def save_flux_model_on_train_end(
@@ -516,7 +534,14 @@ def save_flux_model_on_train_end(
 ):
     def sd_saver(ckpt_file, epoch_no, global_step):
         sai_metadata = train_util.get_sai_model_spec(None, args, False, False, False, is_stable_diffusion_ckpt=True, flux="dev")
-        save_models(ckpt_file, flux, sai_metadata, save_dtype, args.mem_eff_save)
+        client_id = getattr(args, 'log_stream_client_id', None)
+        # At train end, use epoch_no (epoch + 1) for checkpoint naming consistency
+        save_models(
+            ckpt_file, flux, sai_metadata, save_dtype, args.mem_eff_save,
+            client_id=str(client_id) if client_id else None,
+            step_num=epoch_no,
+            is_lora=False
+        )
 
     train_util.save_sd_model_on_train_end_common(args, True, True, epoch, global_step, sd_saver, None)
 
@@ -535,7 +560,16 @@ def save_flux_model_on_epoch_end_or_stepwise(
 ):
     def sd_saver(ckpt_file, epoch_no, global_step):
         sai_metadata = train_util.get_sai_model_spec(None, args, False, False, False, is_stable_diffusion_ckpt=True, flux="dev")
-        save_models(ckpt_file, flux, sai_metadata, save_dtype, args.mem_eff_save)
+        client_id = getattr(args, 'log_stream_client_id', None)
+        # Use epoch_no when saving at epoch end, global_step when saving at step intervals
+        # This matches the checkpoint naming convention: "Checkpoint {epoch_no}" or "Checkpoint {global_step}"
+        checkpoint_number = epoch_no if on_epoch_end else global_step
+        save_models(
+            ckpt_file, flux, sai_metadata, save_dtype, args.mem_eff_save,
+            client_id=str(client_id) if client_id else None,
+            step_num=checkpoint_number,
+            is_lora=False
+        )
 
     train_util.save_sd_model_on_epoch_end_or_stepwise_common(
         args,

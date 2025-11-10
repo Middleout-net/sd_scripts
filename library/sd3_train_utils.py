@@ -29,6 +29,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from library import sd3_models, sd3_utils, strategy_base, train_util
+from library.db_checkpoint_handler import save_checkpoint_to_db, extract_step_number_from_filename
 
 
 def save_models(
@@ -40,6 +41,9 @@ def save_models(
     t5xxl: Optional[T5EncoderModel],
     sai_metadata: Optional[dict],
     save_dtype: Optional[torch.dtype] = None,
+    client_id: Optional[str] = None,
+    step_num: Optional[int] = None,
+    is_lora: bool = False,
 ):
     r"""
     Save models to checkpoint file. Only supports unified checkpoint format.
@@ -83,6 +87,20 @@ def save_models(
         t5xxl_state_dict["shared.weight"] = shared_weight_copy
 
         save_file(t5xxl_state_dict, t5xxl_path)
+    
+    # Save checkpoint metadata to database
+    if client_id is not None:
+        if step_num is None:
+            # Try to extract step number from filename
+            filename = os.path.basename(ckpt_path)
+            step_num = extract_step_number_from_filename(filename)
+        save_checkpoint_to_db(
+            checkpoint_path=ckpt_path,
+            model_id=client_id,
+            step_num=step_num,
+            is_lora=is_lora,
+            base_model='1'  # SD3.5 base model
+        )
 
 
 def save_sd3_model_on_train_end(
@@ -106,8 +124,13 @@ def save_sd3_model_on_train_end(
             is_stable_diffusion_ckpt=True,
             sd3=mmdit.model_type,
         )
+        client_id = getattr(args, 'log_stream_client_id', None)
+        # At train end, use epoch_no (epoch + 1) for checkpoint naming consistency
         save_models(
-            ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype
+            ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype,
+            client_id=str(client_id) if client_id else None,
+            step_num=epoch_no,
+            is_lora=False
         )
 
     train_util.save_sd_model_on_train_end_common(
@@ -141,8 +164,15 @@ def save_sd3_model_on_epoch_end_or_stepwise(
             is_stable_diffusion_ckpt=True,
             sd3=mmdit.model_type,
         )
+        client_id = getattr(args, 'log_stream_client_id', None)
+        # Use epoch_no when saving at epoch end, global_step when saving at step intervals
+        # This matches the checkpoint naming convention: "Checkpoint {epoch_no}" or "Checkpoint {global_step}"
+        checkpoint_number = epoch_no if on_epoch_end else global_step
         save_models(
-            ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype
+            ckpt_file, mmdit, vae, clip_l, clip_g, t5xxl, sai_metadata, save_dtype,
+            client_id=str(client_id) if client_id else None,
+            step_num=checkpoint_number,
+            is_lora=False
         )
 
     train_util.save_sd_model_on_epoch_end_or_stepwise_common(

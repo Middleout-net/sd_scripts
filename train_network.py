@@ -8,6 +8,7 @@ import sys
 import random
 import time
 import json
+import re
 from multiprocessing import Value
 import toml
 
@@ -44,6 +45,7 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 from library.utils import setup_logging, add_logging_arguments
+from library.db_checkpoint_handler import save_checkpoint_to_db, extract_step_number_from_filename
 
 setup_logging()
 import logging
@@ -1222,6 +1224,41 @@ class NetworkTrainer:
             unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
             if args.huggingface_repo_id is not None:
                 huggingface_util.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
+            
+            # Save checkpoint metadata to database
+            client_id = getattr(args, 'log_stream_client_id', None)
+            if client_id is not None:
+                # Determine base model - check if this is SD3 or Flux training
+                # SD3 trainers inherit from sd3_train_network.Sd3NetworkTrainer
+                # Flux trainers inherit from flux_train_network.FluxNetworkTrainer
+                base_model = '1'  # Default to SD3.5
+                if hasattr(self, 'model_type'):
+                    # For SD3, model_type is set in the trainer
+                    base_model = '1'
+                elif 'flux' in str(type(self).__name__).lower():
+                    base_model = '3'
+                
+                # Determine if this is an epoch-based or step-based checkpoint by checking the filename
+                # Epoch-based checkpoints typically have format like "network-epoch-{epoch_no}.safetensors"
+                # Step-based checkpoints typically have format like "network-{step_no}.safetensors"
+                # We need to extract the number from the filename to match what the client expects
+                # The client sends checkpoint_epoch which should match the number in the checkpoint name
+                # Extract number from checkpoint name (e.g., "network-epoch-5" -> 5, "network-1000" -> 1000)
+                numbers_in_name = re.findall(r'\d+', ckpt_name)
+                if numbers_in_name:
+                    # Use the last number found in the name (usually the epoch/step number)
+                    checkpoint_number = int(numbers_in_name[-1])
+                else:
+                    # Fallback: use epoch_no if save_every_n_epochs is set, otherwise use steps
+                    checkpoint_number = epoch_no if args.save_every_n_epochs is not None and args.save_every_n_steps is None else steps
+                    
+                save_checkpoint_to_db(
+                    checkpoint_path=ckpt_file,
+                    model_id=str(client_id),
+                    step_num=checkpoint_number,
+                    is_lora=True,
+                    base_model=base_model
+                )
 
         def remove_model(old_ckpt_name):
             old_ckpt_file = os.path.join(args.output_dir, old_ckpt_name)
