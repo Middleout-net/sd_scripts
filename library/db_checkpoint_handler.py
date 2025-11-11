@@ -25,6 +25,7 @@ All errors will propagate up and stop the training process, ensuring data consis
 import os
 import sys
 import logging
+import traceback
 from typing import Optional
 
 # Add parent directory to path to import Flask app
@@ -110,92 +111,168 @@ def save_checkpoint_to_db(
     
     # Use Flask app context
     logger.debug(f"[DB Checkpoint Handler] Entering Flask app context for DB operations")
-    with flask_app.app_context():
-        if is_lora:
-            # Handle LoRA checkpoint
-            logger.info(f"[DB Checkpoint Handler] Processing LoRA checkpoint for model ID: {model_id}")
-            logger.debug(f"[DB Checkpoint Handler] Querying TempLora table for ID={model_id}, Name='TempLora'")
-            lora_obj = TempLora.select_where(ID=model_id, Name="TempLora").first()
-            if not lora_obj:
-                logger.error(f"[DB Checkpoint Handler] LoRA model {model_id} not found in database")
-                raise ValueError(f"LoRA model {model_id} not found in database")
-            logger.info(f"[DB Checkpoint Handler] ✓ Found LoRA model in DB - ID: {lora_obj.ID}, BaseModel: {lora_obj.BaseModel}")
+    try:
+        with flask_app.app_context():
+            if is_lora:
+                # Handle LoRA checkpoint
+                logger.info(f"[DB Checkpoint Handler] Processing LoRA checkpoint for model ID: {model_id}")
+                logger.debug(f"[DB Checkpoint Handler] Querying TempLora table for ID={model_id}, Name='TempLora'")
+                try:
+                    lora_obj = TempLora.select_where(ID=model_id, Name="TempLora").first()
+                except Exception as e:
+                    logger.error(f"[DB Checkpoint Handler] ❌ ERROR querying TempLora table for ID={model_id}, Name='TempLora'")
+                    logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                    logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                    logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                    raise RuntimeError(f"Failed to query LoRA model from database: {str(e)}") from e
                 
-            # Upsert into TempLora (composite PK: ID + Name)
-            logger.debug(f"[DB Checkpoint Handler] Checking if checkpoint '{checkpoint_name}' already exists in TempLora")
-            existing = TempLora.select_where(ID=lora_obj.ID, Name=checkpoint_name).first()
-            if existing is not None:
-                logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' exists - updating record")
-                logger.debug(f"[DB Checkpoint Handler] Update data - Path: {checkpoint_path}, IconPath: {icon_path}")
-                existing.update(
-                    Path=checkpoint_path,
-                    BaseModel=lora_obj.BaseModel,
-                    ModelId=lora_obj.ModelId,
-                    Type='User-Trained',
-                    IconPath=icon_path,
-                )
-                logger.info(f"[DB Checkpoint Handler] ✓ Successfully updated LoRA checkpoint '{checkpoint_name}' in database")
-            else:
-                logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' does not exist - inserting new record")
-                logger.debug(f"[DB Checkpoint Handler] Insert data - ID: {lora_obj.ID}, Name: {checkpoint_name}, Path: {checkpoint_path}")
-                TempLora.insert_new(
-                    ID=lora_obj.ID,
-                    Name=checkpoint_name,
-                    Path=checkpoint_path,
-                    BaseModel=lora_obj.BaseModel,
-                    ModelId=lora_obj.ModelId,
-                    Type='User-Trained',
-                    IconPath=icon_path,
-                )
-                logger.info(f"[DB Checkpoint Handler] ✓ Successfully inserted LoRA checkpoint '{checkpoint_name}' into database")
-        else:
-            # Handle regular model checkpoint
-            logger.info(f"[DB Checkpoint Handler] Processing regular model checkpoint for model ID: {model_id}")
-            logger.debug(f"[DB Checkpoint Handler] Querying TempModel table for ID={model_id}, ModelName='TempModel'")
-            model_obj = TempModel.select_where(ID=model_id, ModelName="TempModel").first()
-            if not model_obj:
-                logger.error(f"[DB Checkpoint Handler] Model {model_id} not found in database")
-                raise ValueError(f"Model {model_id} not found in database")
-            logger.info(f"[DB Checkpoint Handler] ✓ Found model in DB - ID: {model_obj.ID}, BaseModel: {model_obj.BaseModel}")
+                if not lora_obj:
+                    logger.error(f"[DB Checkpoint Handler] LoRA model {model_id} not found in database")
+                    raise ValueError(f"LoRA model {model_id} not found in database")
+                logger.info(f"[DB Checkpoint Handler] ✓ Found LoRA model in DB - ID: {lora_obj.ID}, BaseModel: {lora_obj.BaseModel}")
+                    
+                # Upsert into TempLora (composite PK: ID + Name)
+                logger.debug(f"[DB Checkpoint Handler] Checking if checkpoint '{checkpoint_name}' already exists in TempLora")
+                try:
+                    existing = TempLora.select_where(ID=lora_obj.ID, Name=checkpoint_name).first()
+                except Exception as e:
+                    logger.error(f"[DB Checkpoint Handler] ❌ ERROR querying TempLora for existing checkpoint - ID={lora_obj.ID}, Name='{checkpoint_name}'")
+                    logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                    logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                    logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                    raise RuntimeError(f"Failed to check for existing LoRA checkpoint in database: {str(e)}") from e
                 
-            # Get default paths for models that need them
-            t5_path = model_obj.T5Path
-            ae_path = model_obj.AePath
-            logger.debug(f"[DB Checkpoint Handler] Model paths - T5: {t5_path}, AE: {ae_path}")
-            
-            # Upsert into TempModel (composite PK: ID + ModelName)
-            logger.debug(f"[DB Checkpoint Handler] Checking if checkpoint '{checkpoint_name}' already exists in TempModel")
-            existing = TempModel.select_where(ID=model_obj.ID, ModelName=checkpoint_name).first()
-            if existing is not None:
-                logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' exists - updating record")
-                logger.debug(f"[DB Checkpoint Handler] Update data - CkptPath: {checkpoint_path}, BaseModel: {base_model}")
-                existing.update(
-                    CkptPath=checkpoint_path,
-                    ClipGPath=clip_g_path if base_model == '1' else None,
-                    ClipLPath=clip_l_path if base_model == '1' else model_obj.ClipLPath,
-                    T5Path=t5_path,
-                    AePath=ae_path if base_model == '3' else None,
-                    BaseModel=base_model,
-                    ModelType='User-Trained',
-                    IconPath=icon_path,
-                )
-                logger.info(f"[DB Checkpoint Handler] ✓ Successfully updated checkpoint '{checkpoint_name}' in database")
+                if existing is not None:
+                    logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' exists - updating record")
+                    logger.debug(f"[DB Checkpoint Handler] Update data - Path: {checkpoint_path}, IconPath: {icon_path}")
+                    try:
+                        existing.update(
+                            Path=checkpoint_path,
+                            BaseModel=lora_obj.BaseModel,
+                            ModelId=lora_obj.ModelId,
+                            Type='User-Trained',
+                            IconPath=icon_path,
+                        )
+                        logger.info(f"[DB Checkpoint Handler] ✓ Successfully updated LoRA checkpoint '{checkpoint_name}' in database")
+                    except Exception as e:
+                        logger.error(f"[DB Checkpoint Handler] ❌ ERROR updating LoRA checkpoint '{checkpoint_name}' in database")
+                        logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                        logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                        logger.error(f"[DB Checkpoint Handler] Update data that failed: Path={checkpoint_path}, BaseModel={lora_obj.BaseModel}, ModelId={lora_obj.ModelId}")
+                        logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                        raise RuntimeError(f"Failed to update LoRA checkpoint in database: {str(e)}") from e
+                else:
+                    logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' does not exist - inserting new record")
+                    logger.debug(f"[DB Checkpoint Handler] Insert data - ID: {lora_obj.ID}, Name: {checkpoint_name}, Path: {checkpoint_path}")
+                    try:
+                        TempLora.insert_new(
+                            ID=lora_obj.ID,
+                            Name=checkpoint_name,
+                            Path=checkpoint_path,
+                            BaseModel=lora_obj.BaseModel,
+                            ModelId=lora_obj.ModelId,
+                            Type='User-Trained',
+                            IconPath=icon_path,
+                        )
+                        logger.info(f"[DB Checkpoint Handler] ✓ Successfully inserted LoRA checkpoint '{checkpoint_name}' into database")
+                    except Exception as e:
+                        logger.error(f"[DB Checkpoint Handler] ❌ ERROR inserting LoRA checkpoint '{checkpoint_name}' into database")
+                        logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                        logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                        logger.error(f"[DB Checkpoint Handler] Insert data that failed: ID={lora_obj.ID}, Name={checkpoint_name}, Path={checkpoint_path}")
+                        logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                        raise RuntimeError(f"Failed to insert LoRA checkpoint into database: {str(e)}") from e
             else:
-                logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' does not exist - inserting new record")
-                logger.debug(f"[DB Checkpoint Handler] Insert data - ID: {model_obj.ID}, ModelName: {checkpoint_name}, CkptPath: {checkpoint_path}")
-                TempModel.insert_new(
-                    ID=model_obj.ID,
-                    ModelName=checkpoint_name,
-                    CkptPath=checkpoint_path,
-                    ClipGPath=clip_g_path if base_model == '1' else None,
-                    ClipLPath=clip_l_path if base_model == '1' else model_obj.ClipLPath,
-                    T5Path=t5_path,
-                    AePath=ae_path if base_model == '3' else None,
-                    BaseModel=base_model,
-                    ModelType='User-Trained',
-                    IconPath=icon_path
-                )
-                logger.info(f"[DB Checkpoint Handler] ✓ Successfully inserted checkpoint '{checkpoint_name}' into database")
+                # Handle regular model checkpoint
+                logger.info(f"[DB Checkpoint Handler] Processing regular model checkpoint for model ID: {model_id}")
+                logger.debug(f"[DB Checkpoint Handler] Querying TempModel table for ID={model_id}, ModelName='TempModel'")
+                try:
+                    model_obj = TempModel.select_where(ID=model_id, ModelName="TempModel").first()
+                except Exception as e:
+                    logger.error(f"[DB Checkpoint Handler] ❌ ERROR querying TempModel table for ID={model_id}, ModelName='TempModel'")
+                    logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                    logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                    logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                    raise RuntimeError(f"Failed to query model from database: {str(e)}") from e
+                
+                if not model_obj:
+                    logger.error(f"[DB Checkpoint Handler] Model {model_id} not found in database")
+                    raise ValueError(f"Model {model_id} not found in database")
+                logger.info(f"[DB Checkpoint Handler] ✓ Found model in DB - ID: {model_obj.ID}, BaseModel: {model_obj.BaseModel}")
+                    
+                # Get default paths for models that need them
+                t5_path = model_obj.T5Path
+                ae_path = model_obj.AePath
+                logger.debug(f"[DB Checkpoint Handler] Model paths - T5: {t5_path}, AE: {ae_path}")
+                
+                # Upsert into TempModel (composite PK: ID + ModelName)
+                logger.debug(f"[DB Checkpoint Handler] Checking if checkpoint '{checkpoint_name}' already exists in TempModel")
+                try:
+                    existing = TempModel.select_where(ID=model_obj.ID, ModelName=checkpoint_name).first()
+                except Exception as e:
+                    logger.error(f"[DB Checkpoint Handler] ❌ ERROR querying TempModel for existing checkpoint - ID={model_obj.ID}, ModelName='{checkpoint_name}'")
+                    logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                    logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                    logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                    raise RuntimeError(f"Failed to check for existing checkpoint in database: {str(e)}") from e
+                
+                if existing is not None:
+                    logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' exists - updating record")
+                    logger.debug(f"[DB Checkpoint Handler] Update data - CkptPath: {checkpoint_path}, BaseModel: {base_model}")
+                    try:
+                        existing.update(
+                            CkptPath=checkpoint_path,
+                            ClipGPath=clip_g_path if base_model == '1' else None,
+                            ClipLPath=clip_l_path if base_model == '1' else model_obj.ClipLPath,
+                            T5Path=t5_path,
+                            AePath=ae_path if base_model == '3' else None,
+                            BaseModel=base_model,
+                            ModelType='User-Trained',
+                            IconPath=icon_path,
+                        )
+                        logger.info(f"[DB Checkpoint Handler] ✓ Successfully updated checkpoint '{checkpoint_name}' in database")
+                    except Exception as e:
+                        logger.error(f"[DB Checkpoint Handler] ❌ ERROR updating checkpoint '{checkpoint_name}' in database")
+                        logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                        logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                        logger.error(f"[DB Checkpoint Handler] Update data that failed: CkptPath={checkpoint_path}, BaseModel={base_model}, ClipGPath={clip_g_path if base_model == '1' else None}")
+                        logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                        raise RuntimeError(f"Failed to update checkpoint in database: {str(e)}") from e
+                else:
+                    logger.info(f"[DB Checkpoint Handler] Checkpoint '{checkpoint_name}' does not exist - inserting new record")
+                    logger.debug(f"[DB Checkpoint Handler] Insert data - ID: {model_obj.ID}, ModelName: {checkpoint_name}, CkptPath: {checkpoint_path}")
+                    try:
+                        TempModel.insert_new(
+                            ID=model_obj.ID,
+                            ModelName=checkpoint_name,
+                            CkptPath=checkpoint_path,
+                            ClipGPath=clip_g_path if base_model == '1' else None,
+                            ClipLPath=clip_l_path if base_model == '1' else model_obj.ClipLPath,
+                            T5Path=t5_path,
+                            AePath=ae_path if base_model == '3' else None,
+                            BaseModel=base_model,
+                            ModelType='User-Trained',
+                            IconPath=icon_path
+                        )
+                        logger.info(f"[DB Checkpoint Handler] ✓ Successfully inserted checkpoint '{checkpoint_name}' into database")
+                    except Exception as e:
+                        logger.error(f"[DB Checkpoint Handler] ❌ ERROR inserting checkpoint '{checkpoint_name}' into database")
+                        logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+                        logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+                        logger.error(f"[DB Checkpoint Handler] Insert data that failed: ID={model_obj.ID}, ModelName={checkpoint_name}, CkptPath={checkpoint_path}")
+                        logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+                        raise RuntimeError(f"Failed to insert checkpoint into database: {str(e)}") from e
+    except (ValueError, FileNotFoundError):
+        # Re-raise validation errors as-is (they already have proper logging)
+        raise
+    except Exception as e:
+        # Catch any other unexpected errors and log them
+        logger.error(f"[DB Checkpoint Handler] ❌ UNEXPECTED ERROR during checkpoint save operation")
+        logger.error(f"[DB Checkpoint Handler] Error type: {type(e).__name__}")
+        logger.error(f"[DB Checkpoint Handler] Error message: {str(e)}")
+        logger.error(f"[DB Checkpoint Handler] Model ID: {model_id}, Step: {step_num}, Is LoRA: {is_lora}")
+        logger.error(f"[DB Checkpoint Handler] Full traceback:\n{traceback.format_exc()}")
+        raise
     
     logger.info(f"[DB Checkpoint Handler] ✓ Checkpoint save completed successfully - Model ID: {model_id}, Step: {step_num}")
 
