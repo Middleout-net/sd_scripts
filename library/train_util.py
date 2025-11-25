@@ -5297,7 +5297,11 @@ def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
 
     # assert args.resolution is not None, f"resolution is required / resolution（解像度）を指定してください"
     if args.resolution is not None:
-        args.resolution = tuple([int(r) for r in args.resolution.split(",")])
+        if isinstance(args.resolution, str):
+            args.resolution = tuple([int(r) for r in args.resolution.split(",")])
+        elif isinstance(args.resolution, (list, tuple)):
+            args.resolution = tuple([int(r) for r in args.resolution])
+
         if len(args.resolution) == 1:
             args.resolution = (args.resolution[0], args.resolution[0])
         assert (
@@ -5305,7 +5309,10 @@ def prepare_dataset_args(args: argparse.Namespace, support_metadata: bool):
         ), f"resolution must be 'size' or 'width,height' / resolution（解像度）は'サイズ'または'幅','高さ'で指定してください: {args.resolution}"
 
     if args.face_crop_aug_range is not None:
-        args.face_crop_aug_range = tuple([float(r) for r in args.face_crop_aug_range.split(",")])
+        if isinstance(args.face_crop_aug_range, str):
+            args.face_crop_aug_range = tuple([float(r) for r in args.face_crop_aug_range.split(",")])
+        elif isinstance(args.face_crop_aug_range, (list, tuple)):
+            args.face_crop_aug_range = tuple([float(r) for r in args.face_crop_aug_range])
         assert (
             len(args.face_crop_aug_range) == 2 and args.face_crop_aug_range[0] <= args.face_crop_aug_range[1]
         ), f"face_crop_aug_range must be two floats / face_crop_aug_rangeは'下限,上限'で指定してください: {args.face_crop_aug_range}"

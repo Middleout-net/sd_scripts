@@ -599,11 +599,13 @@ if __name__ == "__main__":
     args = train_util.read_config_from_file(args, parser)
 
     trainer = FluxNetworkTrainer()
-    print("Sending training logs to client id: "+str(args.log_stream_client_id))
-    if args.log_stream_client_id==-1:
+    print("Sending training logs to client id: " + str(args.log_stream_client_id))
+
+    # Run a single training session; if a log_stream_client_id is provided,
+    # mirror stdout/stderr to the websocket logger instead of the console.
+    if args.log_stream_client_id == -1:
         trainer.train(args)
     else:
         log_stream = LogStream(client_id=str(args.log_stream_client_id))
         with redirect_output(log_stream):
             trainer.train(args)
-    trainer.train(args)
