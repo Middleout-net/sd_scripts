@@ -255,6 +255,8 @@ def create_network_from_weights(multiplier, file, vae, text_encoder, unet, weigh
             break
     if all_linear is None:
         all_linear = False
+    if alpha is None:
+        alpha = 1e-3
 
     module_class = OFTInfModule if for_inference else OFTModule
     network = OFTNetwork(

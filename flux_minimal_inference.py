@@ -579,7 +579,7 @@ def flux_prepare_generation(
             if is_lora or is_oft:
                 break
 
-        module = lora_flux if is_lora else oft_flux
+        module = oft_flux if is_oft else lora_flux
         lora_model, _ = module.create_network_from_weights(
             multiplier, None, ae, [clip_l, t5xxl], model, weights_sd, True
         )
@@ -589,7 +589,7 @@ def flux_prepare_generation(
             lora_model.merge_to([clip_l, t5xxl], model, weights_sd)
         else:
             lora_model.apply_to([clip_l, t5xxl], model)
-            info = lora_model.load_state_dict(weights_sd, strict=True)
+            info = lora_model.load_state_dict(weights_sd, strict=False)
             logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
             lora_model.eval()
             lora_model.to(device)
@@ -800,7 +800,7 @@ if __name__ == "__main__":
             lora_model.merge_to([clip_l, t5xxl], model, weights_sd)
         else:
             lora_model.apply_to([clip_l, t5xxl], model)
-            info = lora_model.load_state_dict(weights_sd, strict=True)
+            info = lora_model.load_state_dict(weights_sd, strict=False)
             logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
             lora_model.eval()
             lora_model.to(device)
