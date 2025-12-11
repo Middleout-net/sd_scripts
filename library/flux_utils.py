@@ -8,6 +8,11 @@ import torch
 from accelerate import init_empty_weights
 from safetensors import safe_open
 from safetensors.torch import load_file
+try:
+    from diffusers import AutoencoderKL
+except ImportError:
+    AutoencoderKL = None
+
 from transformers import CLIPConfig, CLIPTextModel, T5Config, T5EncoderModel
 
 from library.utils import setup_logging
@@ -18,6 +23,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from library import flux_models
+from library import flux_models_flux2
 from library.utils import load_safetensors
 
 MODEL_VERSION_FLUX_V1 = "flux1"
@@ -62,28 +68,46 @@ def analyze_checkpoint_state(ckpt_path: str) -> Tuple[bool, bool, Tuple[int, int
     is_schnell = not ("guidance_in.in_layer.bias" in keys or "time_text_embed.guidance_embedder.linear_1.bias" in keys)
 
     # check number of double and single blocks
+    # Note: FP8 quantized models don't have bias tensors, so we check for weight tensors instead
     if not is_diffusers:
-        max_double_block_index = max(
-            [int(key.split(".")[1]) for key in keys if key.startswith("double_blocks.") and key.endswith(".img_attn.proj.bias")]
-        )
-        max_single_block_index = max(
-            [int(key.split(".")[1]) for key in keys if key.startswith("single_blocks.") and key.endswith(".modulation.lin.bias")]
-        )
+        # Find all double_blocks indices
+        double_block_indices = [int(key.split(".")[1]) for key in keys if key.startswith("double_blocks.") and ".img_attn." in key]
+        single_block_indices = [int(key.split(".")[1]) for key in keys if key.startswith("single_blocks.") and ".linear" in key]
+        
+        if double_block_indices:
+            max_double_block_index = max(double_block_indices)
+        else:
+            logger.warning("No double_blocks found, using default 19")
+            max_double_block_index = 18  # default for FLUX dev
+            
+        if single_block_indices:
+            max_single_block_index = max(single_block_indices)
+        else:
+            logger.warning("No single_blocks found, using default 38")
+            max_single_block_index = 37  # default for FLUX dev
     else:
-        max_double_block_index = max(
-            [
-                int(key.split(".")[1])
-                for key in keys
-                if key.startswith("transformer_blocks.") and key.endswith(".attn.add_k_proj.bias")
-            ]
-        )
-        max_single_block_index = max(
-            [
-                int(key.split(".")[1])
-                for key in keys
-                if key.startswith("single_transformer_blocks.") and key.endswith(".attn.to_k.bias")
-            ]
-        )
+        transformer_block_indices = [
+            int(key.split(".")[1])
+            for key in keys
+            if key.startswith("transformer_blocks.") and ".attn." in key
+        ]
+        single_transformer_indices = [
+            int(key.split(".")[1])
+            for key in keys
+            if key.startswith("single_transformer_blocks.") and ".attn." in key
+        ]
+        
+        if transformer_block_indices:
+            max_double_block_index = max(transformer_block_indices)
+        else:
+            logger.warning("No transformer_blocks found, using default 19")
+            max_double_block_index = 18
+            
+        if single_transformer_indices:
+            max_single_block_index = max(single_transformer_indices)
+        else:
+            logger.warning("No single_transformer_blocks found, using default 38")
+            max_single_block_index = 37
 
     num_double_blocks = max_double_block_index + 1
     num_single_blocks = max_single_block_index + 1
@@ -92,10 +116,18 @@ def analyze_checkpoint_state(ckpt_path: str) -> Tuple[bool, bool, Tuple[int, int
 
 
 def load_flow_model(
-    ckpt_path: str, dtype: Optional[torch.dtype], device: Union[str, torch.device], disable_mmap: bool = False
+    ckpt_path: str, dtype: Optional[torch.dtype], device: Union[str, torch.device], disable_mmap: bool = False, is_flux2: bool = False
 ) -> Tuple[bool, flux_models.Flux]:
     is_diffusers, is_schnell, (num_double_blocks, num_single_blocks), ckpt_paths = analyze_checkpoint_state(ckpt_path)
-    name = MODEL_NAME_DEV if not is_schnell else MODEL_NAME_SCHNELL
+    
+    # Auto-detect FLUX 2 by path name or by block count
+    # FLUX 2 has 8 double blocks and 10 single blocks vs FLUX 1's 19/38
+    if "flux2" in ckpt_path.lower() or num_double_blocks <= 10:
+        logger.info("Detected FLUX 2 model")
+        is_flux2 = True
+        name = "flux2_dev"
+    else:
+        name = MODEL_NAME_DEV if not is_schnell else MODEL_NAME_SCHNELL
 
     # build model
     logger.info(f"Building Flux model {name} from {'Diffusers' if is_diffusers else 'BFL'} checkpoint")
@@ -110,7 +142,10 @@ def load_flow_model(
             logger.info(f"Setting the number of single blocks from {params.depth_single_blocks} to {num_single_blocks}")
             params = replace(params, depth_single_blocks=num_single_blocks)
 
-        model = flux_models.Flux(params)
+        if is_flux2:
+            model = flux_models_flux2.Flux2(params)
+        else:
+            model = flux_models.Flux(params)
         if dtype is not None:
             model = model.to(dtype)
 
@@ -137,20 +172,185 @@ def load_flow_model(
     logger.info(f"Loaded Flux: {info}")
     return is_schnell, model
 
+class DiffusersAEWrapper(torch.nn.Module):
+    def __init__(self, ae):
+        super().__init__()
+        self.ae = ae
+    
+    @property
+    def dtype(self):
+        return self.ae.dtype
+    
+    @property
+    def device(self):
+        return self.ae.device
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        # Expects: x -> z (latents)
+        return self.ae.encode(x).latent_dist.sample()
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        # Expects: z -> img
+        return self.ae.decode(z).sample
+
 
 def load_ae(
-    ckpt_path: str, dtype: torch.dtype, device: Union[str, torch.device], disable_mmap: bool = False
-) -> flux_models.AutoEncoder:
+    ckpt_path: str, dtype: torch.dtype, device: Union[str, torch.device], disable_mmap: bool = False, is_flux2: bool = False
+) -> Union[flux_models.AutoEncoder, DiffusersAEWrapper]:
     logger.info("Building AutoEncoder")
-    with torch.device("meta"):
-        # dev and schnell have the same AE params
-        ae = flux_models.AutoEncoder(flux_models.configs[MODEL_NAME_DEV].ae_params).to(dtype)
+    
+    # Try to detect FLUX 2 by checking the state dict first
+    if not is_flux2:
+        sd_probe = load_safetensors(ckpt_path, device="cpu", disable_mmap=disable_mmap, dtype=dtype)
+        if "encoder.conv_out.weight" in sd_probe:
+            conv_out_shape = sd_probe["encoder.conv_out.weight"].shape
+            if conv_out_shape[0] == 64: # z_channels=32 -> 64
+                logger.info("Detected FLUX 2 VAE (z_channels=32) from probe")
+                is_flux2 = True
+            del sd_probe
+    
+    if is_flux2:
+        logger.info(f"Loading Flux 2 VAE from {ckpt_path} using Diffusers")
+        if AutoencoderKL is None:
+            raise ImportError("diffusers is required to load Flux 2 VAE")
+        
+        # Load directly with Diffusers
+        ae = AutoencoderKL.from_single_file(ckpt_path, latent_channels=32, torch_dtype=dtype).to(device)
+        return DiffusersAEWrapper(ae)
+
+    # Standard Flux 1 loading logic continues below
+    sd = load_safetensors(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+    
+    # Original detection logic kept as backup (though we probe above now)
+    if "encoder.conv_out.weight" in sd:
+        conv_out_shape = sd["encoder.conv_out.weight"].shape
+        if conv_out_shape[0] == 64:
+            is_flux2 = True
+        elif conv_out_shape[0] == 32:
+            is_flux2 = False
+    
+    # Select appropriate config
+    if is_flux2:
+        # Should have been handled above, but just in case
+        ae_params = flux_models.configs["flux2_dev"].ae_params
+    else:
+        ae_params = flux_models.configs[MODEL_NAME_DEV].ae_params
+    
+    ae = flux_models.AutoEncoder(ae_params).to(dtype)
 
     logger.info(f"Loading state dict from {ckpt_path}")
-    sd = load_safetensors(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
     info = ae.load_state_dict(sd, strict=False, assign=True)
     logger.info(f"Loaded AE: {info}")
     return ae
+
+def load_mistral_model(ckpt_path, dtype, device):
+    logger.info(f"Loading Mistral Model from {ckpt_path} with Custom Config")
+    from transformers.models.mistral import modeling_mistral
+    import torch.nn as nn
+    
+    # 1. Config for Mistral 3 Small (Flux 2)
+    config = modeling_mistral.MistralConfig(
+        vocab_size=131072,
+        hidden_size=5120,
+        intermediate_size=32768,
+        num_hidden_layers=30,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        rms_norm_eps=1e-5,
+        rope_theta=10000.0, 
+        max_position_embeddings=32768,
+        sliding_window=None
+    )
+    
+    # Custom RoPE with correct dimension (128 instead of 160)
+    class CustomMistralRotaryEmbedding(nn.Module):
+        def __init__(self, dim, max_position_embeddings=2048, base=10000.0, device=None):
+            super().__init__()
+            self.dim = dim
+            self.max_position_embeddings = max_position_embeddings
+            self.base = base
+            inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+            self._set_cos_sin_cache(
+                seq_len=max_position_embeddings, device=self.inv_freq.device, dtype=torch.get_default_dtype()
+            )
+
+        def _set_cos_sin_cache(self, seq_len, device, dtype):
+            self.max_seq_len_cached = seq_len
+            t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+            freqs = torch.outer(t, self.inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
+            self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+
+        def forward(self, x, position_ids=None, seq_len=None):
+            if seq_len is None:
+                seq_len = x.shape[1] if hasattr(x, 'shape') else self.max_seq_len_cached
+            if seq_len > self.max_seq_len_cached:
+                self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
+            
+            cos = self.cos_cached[:seq_len]
+            sin = self.sin_cached[:seq_len]
+            
+            if position_ids is not None:
+                cos = cos[position_ids].squeeze(1)
+                sin = sin[position_ids].squeeze(1)
+                
+            return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+    
+    # 2. Patch MistralAttention to fix projections
+    original_attn_init = modeling_mistral.MistralAttention.__init__
+    def patched_attn_init(self, config, layer_idx=None):
+        # Call original to set up all attributes
+        original_attn_init(self, config, layer_idx)
+        
+        # Override head_dim and projections
+        self.head_dim = 128
+        
+        hidden_size = config.hidden_size
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        
+        self.q_proj = nn.Linear(hidden_size, num_heads * 128, bias=False)
+        self.k_proj = nn.Linear(hidden_size, num_kv_heads * 128, bias=False)
+        self.v_proj = nn.Linear(hidden_size, num_kv_heads * 128, bias=False)
+        self.o_proj = nn.Linear(num_heads * 128, hidden_size, bias=False)
+    
+    # 3. Patch MistralModel to replace rotary_emb
+    original_model_init = modeling_mistral.MistralModel.__init__
+    def patched_model_init(self, config):
+        original_model_init(self, config)
+        # Replace rotary_emb with our custom one
+        self.rotary_emb = CustomMistralRotaryEmbedding(
+            dim=128,
+            max_position_embeddings=config.max_position_embeddings,
+            base=config.rope_theta
+        )
+
+    try:
+        modeling_mistral.MistralAttention.__init__ = patched_attn_init
+        modeling_mistral.MistralModel.__init__ = patched_model_init
+        model = modeling_mistral.MistralModel(config)
+    finally:
+        modeling_mistral.MistralAttention.__init__ = original_attn_init
+        modeling_mistral.MistralModel.__init__ = original_model_init
+
+    # 4. Load Weights
+    sd = load_safetensors(ckpt_path, device="cpu", dtype=dtype)
+    
+    new_sd = {}
+    for k, v in sd.items():
+        if k.startswith("model."):
+            new_sd[k[6:]] = v
+        else:
+            new_sd[k] = v
+    del sd
+    
+    missing, unexpected = model.load_state_dict(new_sd, strict=False)
+    logger.info(f"Mistral Load: Missing={len(missing)}, Unexpected={len(unexpected)}")
+    
+    model.to(device).to(dtype).eval()
+    return model
 
 
 def load_controlnet(

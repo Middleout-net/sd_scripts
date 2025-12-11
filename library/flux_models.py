@@ -38,6 +38,7 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
+    mlp_ratio_out: float = None  # For FLUX 2: asymmetric MLP (None means same as mlp_ratio)
 
 
 # region autoencoder
@@ -438,6 +439,39 @@ configs = {
             shift_factor=0.1159,
         ),
     ),
+    # FLUX 2 DEV - different architecture from FLUX 1
+    # Based on checkpoint analysis: hidden_size=6144, in_channels=128, context_in_dim=15360
+    # 8 double blocks, 48 single blocks, asymmetric MLP (6x in, 3x out)
+    "flux2_dev": ModelSpec(
+        ckpt_path=None,
+        params=FluxParams(
+            in_channels=128,        # FLUX 2 uses 128 vs FLUX 1's 64
+            vec_in_dim=768,
+            context_in_dim=15360,   # FLUX 2 uses 15360 vs FLUX 1's 4096 (for Mistral text encoder)
+            hidden_size=6144,       # FLUX 2 uses 6144 vs FLUX 1's 3072
+            mlp_ratio=6.0,          # FLUX 2 uses 6.0 for MLP hidden expansion
+            num_heads=48,           # FLUX 2 uses 48 vs FLUX 1's 24
+            depth=8,                # FLUX 2 has 8 double blocks
+            depth_single_blocks=48, # FLUX 2 has 48 single blocks (not 10!)
+            axes_dim=[16, 56, 56],
+            theta=10_000,
+            qkv_bias=False,         # FLUX 2 checkpoint has no bias
+            guidance_embed=True,
+            mlp_ratio_out=3.0,      # FLUX 2 SingleStreamBlock uses 3.0 for output (asymmetric)
+        ),
+        ae_path=None,
+        ae_params=AutoEncoderParams(
+            resolution=256,
+            in_channels=3,
+            ch=128,
+            out_ch=3,
+            ch_mult=[1, 2, 4, 4],
+            num_res_blocks=2,
+            z_channels=32,  # FLUX 2 uses 32 latent channels
+            scale_factor=0.3611,
+            shift_factor=0.1159,
+        ),
+    ),
 }
 
 
@@ -770,6 +804,7 @@ class SingleStreamBlock(nn.Module):
         hidden_size: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
+        mlp_ratio_out: float = None,  # For FLUX 2: different output ratio
         qk_scale: float | None = None,
     ):
         super().__init__()
@@ -778,11 +813,18 @@ class SingleStreamBlock(nn.Module):
         head_dim = hidden_size // num_heads
         self.scale = qk_scale or head_dim**-0.5
 
+        # FLUX 2 uses asymmetric MLP: mlp_ratio=6.0 for input, mlp_ratio_out=3.0 for output
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        self.mlp_hidden_dim_out = int(hidden_size * (mlp_ratio_out if mlp_ratio_out is not None else mlp_ratio))
+        
         # qkv and mlp_in
         self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim)
-        # proj and mlp_out
-        self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size)
+        # proj and mlp_out - uses mlp_hidden_dim_out for input
+        self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim_out, hidden_size)
+        
+        # For asymmetric MLP (FLUX 2): we slice the GELU output instead of projecting
+        # The checkpoint doesn't have a projection layer - it just uses the first mlp_hidden_dim_out dims
+        self.asymmetric_mlp = (self.mlp_hidden_dim != self.mlp_hidden_dim_out)
 
         self.norm = QKNorm(head_dim)
 
@@ -832,8 +874,15 @@ class SingleStreamBlock(nn.Module):
         # compute attention
         attn = attention(q, k, v, pe=pe, attn_mask=attn_mask)
 
-        # compute activation in mlp stream, cat again and run second linear layer
-        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+        # compute activation in mlp stream
+        mlp_out = self.mlp_act(mlp)
+        
+        # For asymmetric MLP (FLUX 2): slice the output to mlp_hidden_dim_out
+        if self.asymmetric_mlp:
+            mlp_out = mlp_out[..., :self.mlp_hidden_dim_out]
+        
+        # cat and run second linear layer
+        output = self.linear2(torch.cat((attn, mlp_out), 2))
         return x + mod.gate * output
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor, txt_attention_mask: Optional[Tensor] = None) -> Tensor:
@@ -914,7 +963,7 @@ class Flux(nn.Module):
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, mlp_ratio_out=params.mlp_ratio_out)
                 for _ in range(params.depth_single_blocks)
             ]
         )
@@ -1127,7 +1176,7 @@ class ControlNetFlux(nn.Module):
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, mlp_ratio_out=params.mlp_ratio_out)
                 for _ in range(controlnet_single_depth)
             ]
         )
@@ -1442,7 +1491,7 @@ class FluxLower(nn.Module):
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, mlp_ratio_out=params.mlp_ratio_out)
                 for _ in range(params.depth_single_blocks)
             ]
         )
