@@ -4,6 +4,7 @@ import argparse
 import datetime
 import math
 import os
+import uuid
 import random
 from typing import Optional, Tuple
 import numpy as np
@@ -261,7 +262,7 @@ def generate_image(
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(
-        output_dir, f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
+        output_dir, f"{uuid.uuid4()}.png"
     )
     out_image.save(output_path)
     logger.info(f"Saved image to {output_path}")
