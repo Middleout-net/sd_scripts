@@ -364,8 +364,14 @@ def load_safetensors(
     else:
         try:
             state_dict = load_file(path, device=device)
-        except:
-            state_dict = load_file(path)  # prevent device invalid Error
+        except Exception as e:
+            # Fallback: load to CPU then move to device
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to load directly to {device}, falling back to CPU load: {e}")
+            state_dict = load_file(path)
+            # Move tensors to target device
+            for key in state_dict.keys():
+                state_dict[key] = state_dict[key].to(device)
         if dtype is not None:
             for key in state_dict.keys():
                 state_dict[key] = state_dict[key].to(dtype=dtype)

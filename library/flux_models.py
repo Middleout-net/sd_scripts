@@ -483,6 +483,29 @@ configs = {
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, attn_mask: Optional[Tensor] = None) -> Tensor:
     q, k = apply_rope(q, k, pe)
 
+    if attn_mask is not None:
+        # Ensure mask length matches the key sequence (txt + img). Incoming masks
+        # are typically [B, txt_len]; pad/truncate and broadcast to sdpa shape.
+        key_len = k.shape[-2]
+        if attn_mask.dim() == 2:
+            if attn_mask.shape[1] < key_len:
+                pad_len = key_len - attn_mask.shape[1]
+                attn_mask = torch.nn.functional.pad(attn_mask, (0, pad_len), value=True)
+            elif attn_mask.shape[1] > key_len:
+                attn_mask = attn_mask[:, :key_len]
+            # sdpa expects True for masked positions
+            attn_mask = (~attn_mask.bool()).to(q.device)
+            attn_mask = attn_mask[:, None, None, :]
+        elif attn_mask.shape[-1] != key_len:
+            pad_len = key_len - attn_mask.shape[-1]
+            if pad_len > 0:
+                attn_mask = torch.nn.functional.pad(attn_mask, (0, pad_len), value=False)
+            else:
+                attn_mask = attn_mask[..., :key_len]
+            attn_mask = attn_mask.to(q.device)
+        else:
+            attn_mask = attn_mask.to(q.device)
+
     x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
     x = rearrange(x, "B H L D -> B L (H D)")
 
@@ -502,6 +525,13 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
 def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
+
+    # Ensure positional encodings length matches query/key sequence length.
+    # If freqs_cis is longer (as observed in Flux2 passport flow), truncate it to xq_'s length.
+    seq_len = xq_.shape[-4]
+    if freqs_cis.shape[-4] != seq_len:
+        freqs_cis = freqs_cis[..., :seq_len, :, :, :]
+
     xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
     xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
     return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)

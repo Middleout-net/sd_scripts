@@ -131,28 +131,39 @@ def load_flow_model(
 
     # build model
     logger.info(f"Building Flux model {name} from {'Diffusers' if is_diffusers else 'BFL'} checkpoint")
+    
+    # Aggressive memory cleanup before loading big model
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    params = flux_models.configs[name].params
+
+    # set the number of blocks
+    if params.depth != num_double_blocks:
+        logger.info(f"Setting the number of double blocks from {params.depth} to {num_double_blocks}")
+        params = replace(params, depth=num_double_blocks)
+    if params.depth_single_blocks != num_single_blocks:
+        logger.info(f"Setting the number of single blocks from {params.depth_single_blocks} to {num_single_blocks}")
+        params = replace(params, depth_single_blocks=num_single_blocks)
+
+    # Build model on meta device to avoid doubling memory
+    # This works with assign=True which replaces meta tensors with loaded tensors
     with torch.device("meta"):
-        params = flux_models.configs[name].params
-
-        # set the number of blocks
-        if params.depth != num_double_blocks:
-            logger.info(f"Setting the number of double blocks from {params.depth} to {num_double_blocks}")
-            params = replace(params, depth=num_double_blocks)
-        if params.depth_single_blocks != num_single_blocks:
-            logger.info(f"Setting the number of single blocks from {params.depth_single_blocks} to {num_single_blocks}")
-            params = replace(params, depth_single_blocks=num_single_blocks)
-
         if is_flux2:
             model = flux_models_flux2.Flux2(params)
         else:
             model = flux_models.Flux(params)
-        if dtype is not None:
-            model = model.to(dtype)
+    
+    # Note: Don't call .to(dtype) here - model is on meta device
+    # dtype is handled in load_safetensors below
 
     # load_sft doesn't support torch.device
     logger.info(f"Loading state dict from {ckpt_path}")
     sd = {}
     for ckpt_path in ckpt_paths:
+        # Load directly to target device with correct dtype
         sd.update(load_safetensors(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype))
 
     # convert Diffusers to BFL
@@ -168,8 +179,20 @@ def load_flow_model(
             break  # the model doesn't have annoying prefix
         sd[new_key] = sd.pop(key)
 
+    # With assign=True, meta tensors are replaced with loaded tensors
+    # No copying - direct assignment of the loaded tensors
     info = model.load_state_dict(sd, strict=False, assign=True)
     logger.info(f"Loaded Flux: {info}")
+    
+    # Free memory from state dict (tensors are now managed by model)
+    del sd
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # Model should already be on correct device/dtype from loaded tensors
+    # No need for .to() calls which would create copies
     return is_schnell, model
 
 class DiffusersAEWrapper(torch.nn.Module):
@@ -241,6 +264,14 @@ def load_ae(
     logger.info(f"Loading state dict from {ckpt_path}")
     info = ae.load_state_dict(sd, strict=False, assign=True)
     logger.info(f"Loaded AE: {info}")
+    
+    # Free memory
+    del sd
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
     return ae
 
 def load_mistral_model(ckpt_path, dtype, device):
@@ -348,6 +379,13 @@ def load_mistral_model(ckpt_path, dtype, device):
     
     missing, unexpected = model.load_state_dict(new_sd, strict=False)
     logger.info(f"Mistral Load: Missing={len(missing)}, Unexpected={len(unexpected)}")
+    
+    # Free memory
+    del new_sd
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     model.to(device).to(dtype).eval()
     return model

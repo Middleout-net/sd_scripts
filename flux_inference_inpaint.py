@@ -162,6 +162,8 @@ class FluxInpaintPipeline:
             logger.info("Loading Mistral model for FLUX 2...")
             try:
                 self.mistral_model = flux_utils.load_mistral_model(t5xxl_path, self.dtype, self.device)
+                # Offload Mistral to CPU to save VRAM for Flux loading
+                self.mistral_model.to("cpu")
                 self.t5xxl = None
             except Exception as e:
                 logger.error(f"Failed to load Mistral encoder: {e}")
@@ -169,11 +171,26 @@ class FluxInpaintPipeline:
         else:
             # Standard FLUX 1 mode - load T5
             self.t5xxl = flux_utils.load_t5xxl(t5xxl_path, self.dtype, self.device)
+            # Offload T5 to CPU
+            if self.t5xxl:
+                self.t5xxl.to("cpu")
         
+        # Clean memory
+        torch.cuda.empty_cache()
+
         self.ae = flux_utils.load_ae(ae_path, self.dtype, self.device, is_flux2=self.use_mistral)
+        # Offload AE to CPU
+        self.ae.to("cpu")
         
-        is_schnell, self.model = flux_utils.load_flow_model(ckpt_path, None, self.device)
-        self.model.to(self.flux_dtype).eval()
+        # Clean memory again before big model load
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        # Load Flux model to CPU initially to save VRAM
+        is_schnell, self.model = flux_utils.load_flow_model(ckpt_path, self.flux_dtype, "cpu")
+        # Model weights are on CPU
+        self.model.eval()
         self.is_schnell = is_schnell
         
         # Strategies
@@ -203,8 +220,14 @@ class FluxInpaintPipeline:
         # Encode Image
         img_tensor = torch.from_numpy(np.array(input_image)).float() / 127.5 - 1.0
         img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0).to(self.device).to(self.ae.dtype)
+        
+        # Offload: Move AE to GPU
+        self.ae.to(self.device)
         with torch.no_grad():
              latents = self.ae.encode(img_tensor)
+        # Offload: Move AE back to CPU
+        self.ae.to("cpu")
+        torch.cuda.empty_cache()
         packed_latents = pack_latents_flux(latents).to(self.flux_dtype)
         
         # Process Mask
@@ -249,37 +272,56 @@ class FluxInpaintPipeline:
         # Prepare Prompt
         if self.use_mistral:
              # Custom Mistral Encoding
+             # Offload: Move Mistral to GPU
+             self.mistral_model.to(self.device)
              with torch.no_grad():
                  inputs = self.tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True, padding="max_length").to(self.device)
-                 outputs = self.mistral_model(**inputs)
+                 # Request hidden states to allow concatenation if needed
+                 outputs = self.mistral_model(**inputs, output_hidden_states=True)
                  
                  # hidden_states: [B, Seq, Dim]
-                 # We assume this is 'txt'
+                 # for Flux 2 with context_in_dim 15360, we likely need to concat last 3 layers (5120*3)
                  txt = outputs.last_hidden_state.to(self.flux_dtype)
                  
-                 # Pool for 'vec'?
-                 # Flux 2 might use EOS token or Mean.
-                 # Let's check UNet expected dim.
-                 if hasattr(self.model, 'params'):
-                      expected_vec_dim = self.model.params.vec_in_dim
-                 else:
-                      expected_vec_dim = 768 # Default Flux 1
+                 if hasattr(self.model, 'params') and self.model.params.context_in_dim == 15360 and txt.shape[-1] == 5120:
+                     # Concatenate last 3 hidden states
+                     h_states = outputs.hidden_states
+                     # Check if we have enough states
+                     if len(h_states) >= 3:
+                         txt = torch.cat([h_states[-3], h_states[-2], h_states[-1]], dim=-1).to(self.flux_dtype)
+                         print(f"Concatenated 3 Mistral hidden states to shape {txt.shape}")
+                     else:
+                         print(f"Warning: Not enough hidden states ({len(h_states)}) to concat for Flux 2")
+                         # Fallback: repeat?
+                         txt = torch.cat([txt, txt, txt], dim=-1)
+                 elif hasattr(self.model, 'params') and self.model.params.context_in_dim != txt.shape[-1]:
+                     print(f"Warning: Mistral output dim {txt.shape[-1]} != Model context dim {self.model.params.context_in_dim}")
+             
+             # Offload: Move Mistral back to CPU
+             self.mistral_model.to("cpu")
+             torch.cuda.empty_cache()
                  
-                 if txt.shape[-1] == expected_vec_dim:
-                      # If dims match, maybe pull EOS?
-                      # inputs.input_ids argmax?
-                      # Using mean for now as safe fallback?
-                      vec = txt.mean(dim=1)
-                 else:
-                      # If mismatch (e.g. 4096 vs 768), we can't easily project without weights.
-                      # Assuming Flux 2 UNet matches Mistral dim (4096?) or allows it.
-                      # Or maybe vec is 0?
-                      vec = torch.zeros((txt.shape[0], expected_vec_dim), device=self.device, dtype=self.flux_dtype)
-                 
-                 t5_out = txt
-                 txt_ids = torch.zeros(txt.shape[0], txt.shape[1], 3, device=self.device, dtype=self.flux_dtype)
-                 t5_attn_mask = inputs.attention_mask.bool()
-                 l_pooled = vec
+             # Pool for 'vec'?
+             # Flux 2 might use EOS token or Mean.
+             # Let's check UNet expected dim.
+             if hasattr(self.model, 'params'):
+                  expected_vec_dim = self.model.params.vec_in_dim
+             else:
+                  expected_vec_dim = 768 # Default Flux 1
+             
+             if expected_vec_dim > 1000: # Context dim usually > 1000
+                  # If vec_in is same as context, use pooled or mean
+                  vec = txt.mean(dim=1)
+             else:
+                  # If mismatch (e.g. 4096 vs 768), we can't easily project without weights.
+                  # Assuming Flux 2 UNet matches Mistral dim (4096?) or allows it.
+                  # Or maybe vec is 0?
+                  vec = torch.zeros((txt.shape[0], expected_vec_dim), device=self.device, dtype=self.flux_dtype)
+             
+             t5_out = txt
+             txt_ids = torch.zeros(txt.shape[0], txt.shape[1], 3, device=self.device, dtype=self.flux_dtype)
+             t5_attn_mask = inputs.attention_mask.bool()
+             l_pooled = vec
 
         else:
              # Standard Flux
@@ -298,29 +340,44 @@ class FluxInpaintPipeline:
         # Denoise
         timesteps = get_schedule(steps, packed_latents.shape[1], shift=not self.is_schnell)
         
-        x = denoise_inpaint(
-             self.model,
-             noise,
-             img_ids,
-             t5_out,
-             txt_ids,
-             l_pooled,
-             timesteps,
-             guidance=guidance,
-             t5_attn_mask=t5_attn_mask,
-             cancel_flag=cancel_flag,
-             inpaint_latents=packed_latents,
-             inpaint_masks=m_packed,
-             initial_noise=noise
-        )
+        # Offload: Move Flux to GPU
+        print("Moving Flux model to GPU...")
+        self.model.to(self.device)
+        
+        try:
+            x = denoise_inpaint(
+                 self.model,
+                 noise,
+                 img_ids,
+                 t5_out,
+                 txt_ids,
+                 l_pooled,
+                 timesteps,
+                 guidance=guidance,
+                 t5_attn_mask=t5_attn_mask,
+                 cancel_flag=cancel_flag,
+                 inpaint_latents=packed_latents,
+                 inpaint_masks=m_packed,
+                 initial_noise=noise
+            )
+        finally:
+            # Offload: Move Flux back to CPU
+            print("Moving Flux model back to CPU...")
+            self.model.to("cpu")
+            torch.cuda.empty_cache()
         
         if x is None: return None
         
         # Decode
         # unpack expects latent height/width, the function will multiply by 2 internally due to ph=2, pw=2
         x = unpack_latents_flux(x, latent_h, latent_w)
+        # Offload: Move AE to GPU
+        self.ae.to(self.device)
         with torch.no_grad():
              x = self.ae.decode(x)
+        # Offload: Move AE back to CPU
+        self.ae.to("cpu")
+        torch.cuda.empty_cache()
              
         x = x.clamp(-1, 1)
         x = x.permute(0, 2, 3, 1)
