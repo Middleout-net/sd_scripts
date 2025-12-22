@@ -539,7 +539,7 @@ def save_flux_model_on_train_end(
         save_models(
             ckpt_file, flux, sai_metadata, save_dtype, args.mem_eff_save,
             client_id=str(client_id) if client_id else None,
-            step_num=epoch_no,
+            step_num=epoch_no + 1,
             is_lora=False
         )
 
