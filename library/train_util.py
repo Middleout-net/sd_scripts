@@ -5753,7 +5753,9 @@ def save_sd_model_on_epoch_end_or_stepwise_common(
 ):
     if on_epoch_end:
         epoch_no = epoch + 1
-        saving = epoch_no % args.save_every_n_epochs == 0 and epoch_no < num_train_epochs
+        is_final_epoch = epoch_no == num_train_epochs
+        # Always save on the final epoch, or on regular interval
+        saving = epoch_no % args.save_every_n_epochs == 0 or is_final_epoch
         if not saving:
             return
 

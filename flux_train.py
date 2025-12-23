@@ -946,11 +946,8 @@ def train(args):
 
     del accelerator  # この後メモリを使うのでこれは消す
 
-    if is_main_process:
-        flux_train_utils.save_flux_model_on_train_end(
-            args, save_dtype, epoch, global_step, flux
-        )
-        logger.info("model saved.")
+    # Final checkpoint was already saved via save_flux_model_on_epoch_end_or_stepwise
+    # No additional action needed here
 
 
 def setup_parser() -> argparse.ArgumentParser:
