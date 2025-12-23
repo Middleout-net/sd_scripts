@@ -499,12 +499,8 @@ def train(args):
 
     del accelerator  # この後メモリを使うのでこれは消す
 
-    if is_main_process:
-        src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-        train_util.save_sd_model_on_train_end(
-            args, src_path, save_stable_diffusion_format, use_safetensors, save_dtype, epoch, global_step, text_encoder, unet, vae
-        )
-        logger.info("model saved.")
+    # Final checkpoint was already saved via save_sd_model_on_epoch_end_or_stepwise
+    # No additional action needed here
 
 
 def setup_parser() -> argparse.ArgumentParser:
