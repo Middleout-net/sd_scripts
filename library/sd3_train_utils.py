@@ -453,16 +453,22 @@ def sample_images(
         if not args.sample_at_first:
             return
     else:
-        if args.sample_every_n_steps is None and args.sample_every_n_epochs is None:
+        # Check if this is the final epoch - always sample on final epoch
+        is_final_epoch = False
+        if epoch is not None and hasattr(args, 'max_train_epochs') and args.max_train_epochs is not None:
+            if epoch == args.max_train_epochs:
+                is_final_epoch = True
+
+        if args.sample_every_n_steps is None and args.sample_every_n_epochs is None and not is_final_epoch:
             return
         if args.sample_every_n_epochs is not None:
             # sample_every_n_steps は無視する
-            if epoch is None or epoch % args.sample_every_n_epochs != 0:
+            if (epoch is None or epoch % args.sample_every_n_epochs != 0) and not is_final_epoch:
                 return
         else:
             if (
                 steps % args.sample_every_n_steps != 0 or epoch is not None
-            ):  # steps is not divisible or end of epoch
+            ) and not is_final_epoch:  # steps is not divisible or end of epoch
                 return
 
     logger.info("")

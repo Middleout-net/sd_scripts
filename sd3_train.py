@@ -969,19 +969,8 @@ def train(args):
 
     del accelerator  # この後メモリを使うのでこれは消す
 
-    if is_main_process:
-        sd3_train_utils.save_sd3_model_on_train_end(
-            args,
-            save_dtype,
-            epoch,
-            global_step,
-            clip_l if train_clip else None,
-            clip_g if train_clip else None,
-            t5xxl if train_t5xxl else None,
-            mmdit if train_mmdit else None,
-            vae,
-        )
-        logger.info("model saved.")
+    # Final checkpoint was already saved via save_sd3_model_on_epoch_end_or_stepwise
+    # No additional action needed here
 
 
 def setup_parser() -> argparse.ArgumentParser:
