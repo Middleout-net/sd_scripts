@@ -592,6 +592,15 @@ def flux_prepare_generation(
             lora_model.apply_to([clip_l, t5xxl], model)
             info = lora_model.load_state_dict(weights_sd, strict=False)
             logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
+            
+            # Validating that we actually loaded something
+            if len(info.missing_keys) > 0:
+                 # Check if ALL keys are missing (total failure)
+                 all_keys = list(lora_model.state_dict().keys())
+                 if len(info.missing_keys) == len(all_keys):
+                      logger.error(f"LoRA Load Failure: All {len(all_keys)} keys were missing from {weights_file}. Expected keys like: {all_keys[:3]}")
+                      raise ValueError(f"Failed to load LoRA {weights_file}: Checkpoint keys do not match the expected LoRA network structure. The file might be corrupted or for a different model version.")
+            
             lora_model.eval()
             lora_model.to(device)
 
